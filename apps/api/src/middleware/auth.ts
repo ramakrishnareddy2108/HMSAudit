@@ -5,30 +5,37 @@ export async function authenticate(
   request: FastifyRequest,
   reply: FastifyReply,
 ): Promise<void> {
-  const authHeader = request.headers.authorization
+  const token = request.headers.authorization?.replace('Bearer ', '')
 
-  if (!authHeader?.startsWith('Bearer ')) {
-    return reply.status(401).send({ error: 'Missing or invalid authorization header' })
+  if (!token) {
+    return reply.code(401).send({ error: 'Unauthorized' })
   }
 
-  try {
-    const decoded = await request.jwtVerify<{ sub: string }>()
-    const user = await request.server.prisma.user.findUnique({
-      where: { id: decoded.sub },
-    })
+  const {
+    data: { user },
+    error,
+  } = await request.server.supabase.auth.getUser(token)
 
-    if (!user) {
-      return reply.status(401).send({ error: 'User not found' })
-    }
-
-    if (!user.isActive) {
-      return reply.status(403).send({ error: 'User account is inactive' })
-    }
-
-    request.user = user
-  } catch {
-    return reply.status(401).send({ error: 'Invalid or expired token' })
+  if (error || !user) {
+    return reply.code(401).send({ error: 'Invalid token' })
   }
+
+  const dbUser = await request.server.prisma.user.findUnique({
+    where: { email: user.email! },
+    include: {
+      departments: { include: { department: true } },
+    },
+  })
+
+  if (!dbUser) {
+    return reply.code(401).send({ error: 'User not provisioned' })
+  }
+
+  if (!dbUser.isActive) {
+    return reply.code(403).send({ error: 'Account deactivated' })
+  }
+
+  request.user = dbUser
 }
 
 export function requireRole(...roles: Role[]) {
@@ -36,7 +43,7 @@ export function requireRole(...roles: Role[]) {
     request: FastifyRequest,
     reply: FastifyReply,
   ): Promise<void> {
-    if (!roles.includes(request.user.role)) {
+    if (!roles.includes((request.user as { role: Role }).role)) {
       return reply.status(403).send({ error: 'Insufficient permissions' })
     }
   }

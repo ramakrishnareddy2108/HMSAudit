@@ -34,9 +34,9 @@ export const ocrWorker = new Worker<OcrJobData>(
             invoiceDate: result.invoiceDate,
             invoiceAmount: result.invoiceAmount,
             currency: result.currency,
-            confidence: result.confidence,
+            confidence: result.confidence as unknown as Record<string, number>,
           },
-          ocrModelUsed: result.modelUsed,
+          ocrModelUsed: config.openai.ocrModel,
           ocrProcessedAt: new Date(),
         },
       })
@@ -52,7 +52,7 @@ export const ocrWorker = new Worker<OcrJobData>(
     }
   },
   {
-    connection: { url: config.redis.url },
+    connection: { url: config.redis.url, maxRetriesPerRequest: null, enableReadyCheck: false },
     concurrency: 3,
   },
 )

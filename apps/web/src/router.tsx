@@ -1,14 +1,13 @@
 import { createBrowserRouter, Navigate } from 'react-router-dom'
-import { useAuthStore } from '@/stores/authStore'
-import { Role } from '@shared/types/user'
-import type { User } from '@shared/types/user'
+import { useAuthStore, type AuthUser } from '@/stores/authStore'
 import AppLayout from '@/components/layout/AppLayout'
 
 import LoginPage from '@/pages/LoginPage'
+import ForgotPasswordPage from '@/pages/ForgotPasswordPage'
 import InvoiceListPage from '@/pages/InvoiceListPage'
-import AddInvoicePage from '@/pages/AddInvoicePage'
-import InvoiceDetailPage from '@/pages/InvoiceDetailPage'
-import EditInvoicePage from '@/pages/EditInvoicePage'
+import AddInvoicePage from '@/pages/invoices/AddInvoicePage'
+import InvoiceDetailPage from '@/pages/invoices/InvoiceDetailPage'
+import EditInvoicePage from '@/pages/invoices/EditInvoicePage'
 import ReviewQueuePage from '@/pages/ReviewQueuePage'
 import ReviewDetailPage from '@/pages/ReviewDetailPage'
 import GrnSyncPage from '@/pages/admin/GrnSyncPage'
@@ -16,13 +15,17 @@ import ReconciliationPage from '@/pages/admin/ReconciliationPage'
 import PaymentsPage from '@/pages/admin/PaymentsPage'
 import VendorLedgerPage from '@/pages/admin/VendorLedgerPage'
 import VendorManagementPage from '@/pages/admin/VendorManagementPage'
+import DepartmentManagementPage from '@/pages/admin/DepartmentManagementPage'
 import UserManagementPage from '@/pages/admin/UserManagementPage'
+import NotificationsPage from '@/pages/NotificationsPage'
 import ReportsPage from '@/pages/admin/ReportsPage'
 import DashboardPage from '@/pages/admin/DashboardPage'
 
+type AppRole = AuthUser['role']
+
 interface ProtectedRouteProps {
   children: React.ReactNode
-  roles?: Role[]
+  roles?: AppRole[]
 }
 
 function ProtectedRoute({ children, roles }: ProtectedRouteProps) {
@@ -32,7 +35,7 @@ function ProtectedRoute({ children, roles }: ProtectedRouteProps) {
     return <Navigate to="/login" replace />
   }
 
-  if (roles && !roles.includes((user as User).role)) {
+  if (roles && !roles.includes(user.role)) {
     return (
       <div className="flex flex-col items-center justify-center min-h-screen">
         <h1 className="text-2xl font-bold">403 – Forbidden</h1>
@@ -48,6 +51,10 @@ export const router = createBrowserRouter([
   {
     path: '/login',
     element: <LoginPage />,
+  },
+  {
+    path: '/forgot-password',
+    element: <ForgotPasswordPage />,
   },
   {
     path: '/',
@@ -69,7 +76,7 @@ export const router = createBrowserRouter([
       {
         path: 'invoices/new',
         element: (
-          <ProtectedRoute roles={[Role.role_1, Role.admin]}>
+          <ProtectedRoute roles={["role_1", "admin"]}>
             <AddInvoicePage />
           </ProtectedRoute>
         ),
@@ -85,7 +92,7 @@ export const router = createBrowserRouter([
       {
         path: 'invoices/:id/edit',
         element: (
-          <ProtectedRoute roles={[Role.role_1, Role.admin]}>
+          <ProtectedRoute roles={["role_1", "admin"]}>
             <EditInvoicePage />
           </ProtectedRoute>
         ),
@@ -93,7 +100,7 @@ export const router = createBrowserRouter([
       {
         path: 'review',
         element: (
-          <ProtectedRoute roles={[Role.role_2, Role.admin]}>
+          <ProtectedRoute roles={["role_2", "admin"]}>
             <ReviewQueuePage />
           </ProtectedRoute>
         ),
@@ -101,7 +108,7 @@ export const router = createBrowserRouter([
       {
         path: 'review/:id',
         element: (
-          <ProtectedRoute roles={[Role.role_2, Role.admin]}>
+          <ProtectedRoute roles={["role_2", "admin"]}>
             <ReviewDetailPage />
           </ProtectedRoute>
         ),
@@ -109,7 +116,7 @@ export const router = createBrowserRouter([
       {
         path: 'admin/grn-sync',
         element: (
-          <ProtectedRoute roles={[Role.admin]}>
+          <ProtectedRoute roles={["admin"]}>
             <GrnSyncPage />
           </ProtectedRoute>
         ),
@@ -117,7 +124,7 @@ export const router = createBrowserRouter([
       {
         path: 'admin/reconciliation',
         element: (
-          <ProtectedRoute roles={[Role.admin]}>
+          <ProtectedRoute roles={["admin"]}>
             <ReconciliationPage />
           </ProtectedRoute>
         ),
@@ -125,7 +132,7 @@ export const router = createBrowserRouter([
       {
         path: 'admin/payments',
         element: (
-          <ProtectedRoute roles={[Role.admin]}>
+          <ProtectedRoute roles={["admin"]}>
             <PaymentsPage />
           </ProtectedRoute>
         ),
@@ -133,7 +140,7 @@ export const router = createBrowserRouter([
       {
         path: 'admin/ledger',
         element: (
-          <ProtectedRoute roles={[Role.admin]}>
+          <ProtectedRoute roles={["admin"]}>
             <VendorLedgerPage />
           </ProtectedRoute>
         ),
@@ -141,15 +148,31 @@ export const router = createBrowserRouter([
       {
         path: 'admin/vendors',
         element: (
-          <ProtectedRoute roles={[Role.admin]}>
+          <ProtectedRoute roles={["admin"]}>
             <VendorManagementPage />
+          </ProtectedRoute>
+        ),
+      },
+      {
+        path: 'admin/departments',
+        element: (
+          <ProtectedRoute roles={["admin"]}>
+            <DepartmentManagementPage />
+          </ProtectedRoute>
+        ),
+      },
+      {
+        path: 'notifications',
+        element: (
+          <ProtectedRoute>
+            <NotificationsPage />
           </ProtectedRoute>
         ),
       },
       {
         path: 'admin/users',
         element: (
-          <ProtectedRoute roles={[Role.admin]}>
+          <ProtectedRoute roles={["admin"]}>
             <UserManagementPage />
           </ProtectedRoute>
         ),
@@ -157,7 +180,7 @@ export const router = createBrowserRouter([
       {
         path: 'admin/reports',
         element: (
-          <ProtectedRoute roles={[Role.admin]}>
+          <ProtectedRoute roles={["admin"]}>
             <ReportsPage />
           </ProtectedRoute>
         ),
@@ -165,7 +188,7 @@ export const router = createBrowserRouter([
       {
         path: 'admin/dashboard',
         element: (
-          <ProtectedRoute roles={[Role.admin]}>
+          <ProtectedRoute roles={["admin"]}>
             <DashboardPage />
           </ProtectedRoute>
         ),

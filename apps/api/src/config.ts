@@ -16,13 +16,11 @@ export const config = {
   google: {
     visionApiKey: process.env.GOOGLE_CLOUD_VISION_API_KEY!,
   },
-  anthropic: {
-    apiKey: process.env.ANTHROPIC_API_KEY!,
+  openai: {
+    apiKey: process.env.OPENAI_API_KEY!,
+    ocrModel: 'gpt-4o-mini',
   },
   resend: {
     apiKey: process.env.RESEND_API_KEY!,
-  },
-  jwt: {
-    secret: process.env.JWT_SECRET!,
   },
 }

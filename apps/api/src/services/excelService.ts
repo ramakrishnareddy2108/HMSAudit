@@ -1,56 +1,104 @@
 import * as XLSX from 'xlsx'
 
-interface GrnExcelRow {
-  grnNumber: string
-  invoiceNumber: string | null
+export interface GrnRow {
   vendorName: string | null
+  invoiceNumber: string | null
+  grnNumber: string
   grnAmount: number
   grnDate: string | null
 }
 
-interface ParseResult {
-  rows: GrnExcelRow[]
-  errors: string[]
+const COLUMN_ALIASES: Record<string, keyof GrnRow> = {
+  vendor_name: 'vendorName',
+  vendor: 'vendorName',
+  invoice_number: 'invoiceNumber',
+  invoice_no: 'invoiceNumber',
+  grn_number: 'grnNumber',
+  grn_no: 'grnNumber',
+  grn_amount: 'grnAmount',
+  amount: 'grnAmount',
+  grn_date: 'grnDate',
+  date: 'grnDate',
+}
+
+const REQUIRED_FIELDS: Array<keyof GrnRow> = ['grnNumber', 'grnAmount']
+
+function normalizeHeader(key: string): string {
+  return key.trim().toLowerCase().replace(/\s+/g, '_')
 }
 
 export class ExcelService {
-  parseGrnUpload(buffer: Buffer): ParseResult {
-    const workbook = XLSX.read(buffer, { type: 'buffer' })
+  parseGrnExcel(buffer: Buffer): GrnRow[] {
+    const workbook = XLSX.read(buffer, { type: 'buffer', cellDates: true })
     const sheetName = workbook.SheetNames[0]
 
-    if (!sheetName) {
-      return { rows: [], errors: ['Excel file has no sheets'] }
-    }
+    if (!sheetName) throw new Error('Excel file has no sheets')
 
     const sheet = workbook.Sheets[sheetName]
-    const rawRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet)
+    const rawRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: null })
 
-    const rows: GrnExcelRow[] = []
-    const errors: string[] = []
+    if (rawRows.length === 0) return []
 
-    rawRows.forEach((raw, idx) => {
-      const grnNumber = raw['GRN Number'] ?? raw['grn_number'] ?? raw['GRNNumber']
-      if (!grnNumber || typeof grnNumber !== 'string') {
-        errors.push(`Row ${idx + 2}: missing or invalid GRN Number`)
-        return
+    const colMap = new Map<string, keyof GrnRow>()
+    for (const key of Object.keys(rawRows[0])) {
+      const normalized = normalizeHeader(key)
+      const field = COLUMN_ALIASES[normalized]
+      if (field) colMap.set(key, field)
+    }
+
+    const presentFields = new Set(colMap.values())
+    for (const req of REQUIRED_FIELDS) {
+      if (!presentFields.has(req)) {
+        const aliases = Object.entries(COLUMN_ALIASES)
+          .filter(([, v]) => v === req)
+          .map(([k]) => k)
+          .join(' / ')
+        throw new Error(`Required column missing: expected one of [${aliases}]`)
+      }
+    }
+
+    const rows: GrnRow[] = []
+
+    for (const raw of rawRows) {
+      const mapped: Partial<Record<keyof GrnRow, unknown>> = {}
+      for (const [rawKey, field] of colMap.entries()) {
+        mapped[field] = raw[rawKey]
       }
 
-      const grnAmount = Number(raw['GRN Amount'] ?? raw['grn_amount'] ?? raw['Amount'])
-      if (isNaN(grnAmount) || grnAmount <= 0) {
-        errors.push(`Row ${idx + 2}: missing or invalid GRN Amount`)
-        return
+      const rawGrnNumber = mapped.grnNumber
+      if (!rawGrnNumber || String(rawGrnNumber).trim() === '') continue
+
+      const grnAmount = Number(mapped.grnAmount)
+      if (isNaN(grnAmount)) continue
+
+      let grnDate: string | null = null
+      const rawDate = mapped.grnDate
+      if (rawDate instanceof Date) {
+        grnDate = rawDate.toISOString().slice(0, 10)
+      } else if (typeof rawDate === 'string' && rawDate.trim()) {
+        grnDate = rawDate.trim()
+      } else if (typeof rawDate === 'number') {
+        const jsDate = new Date(Math.round((rawDate - 25569) * 86400 * 1000))
+        grnDate = jsDate.toISOString().slice(0, 10)
       }
+
+      const rawVendorName = mapped.vendorName
+      const rawInvoiceNumber = mapped.invoiceNumber
 
       rows.push({
-        grnNumber: grnNumber.trim(),
-        invoiceNumber: typeof raw['Invoice Number'] === 'string' ? raw['Invoice Number'].trim() : null,
-        vendorName: typeof raw['Vendor Name'] === 'string' ? raw['Vendor Name'].trim() : null,
+        grnNumber: String(rawGrnNumber).trim(),
         grnAmount,
-        grnDate: typeof raw['GRN Date'] === 'string' ? raw['GRN Date'] : null,
+        grnDate,
+        vendorName:
+          rawVendorName && String(rawVendorName).trim() ? String(rawVendorName).trim() : null,
+        invoiceNumber:
+          rawInvoiceNumber && String(rawInvoiceNumber).trim()
+            ? String(rawInvoiceNumber).trim()
+            : null,
       })
-    })
+    }
 
-    return { rows, errors }
+    return rows
   }
 
   generateExportBuffer(data: Record<string, unknown>[]): Buffer {

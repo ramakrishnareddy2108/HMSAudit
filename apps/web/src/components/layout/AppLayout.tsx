@@ -14,6 +14,7 @@ import {
   BarChart2,
   LayoutDashboard,
   Bell,
+  Building2,
   ChevronDown,
   LogOut,
   Menu,
@@ -28,14 +29,15 @@ interface NavItem {
 }
 
 const navItems: NavItem[] = [
+  { label: 'Dashboard', href: '/admin/dashboard', icon: <LayoutDashboard size={18} />, roles: ['admin'] },
   { label: 'Invoices', href: '/invoices', icon: <FileText size={18} /> },
   { label: 'Review Queue', href: '/review', icon: <ClipboardCheck size={18} />, roles: ['role_2', 'admin'] },
-  { label: 'Dashboard', href: '/admin/dashboard', icon: <LayoutDashboard size={18} />, roles: ['admin'] },
   { label: 'GRN Sync', href: '/admin/grn-sync', icon: <UploadCloud size={18} />, roles: ['admin'] },
   { label: 'Reconciliation', href: '/admin/reconciliation', icon: <GitMerge size={18} />, roles: ['admin'] },
   { label: 'Payments', href: '/admin/payments', icon: <CreditCard size={18} />, roles: ['admin'] },
   { label: 'Vendor Ledger', href: '/admin/ledger', icon: <BookOpen size={18} />, roles: ['admin'] },
   { label: 'Vendors', href: '/admin/vendors', icon: <Store size={18} />, roles: ['admin'] },
+  { label: 'Departments', href: '/admin/departments', icon: <Building2 size={18} />, roles: ['admin'] },
   { label: 'Users', href: '/admin/users', icon: <Users size={18} />, roles: ['admin'] },
   { label: 'Reports', href: '/admin/reports', icon: <BarChart2 size={18} />, roles: ['admin'] },
 ]
@@ -114,7 +116,10 @@ export default function AppLayout() {
 
           <div className="flex items-center gap-3 ml-auto">
             {/* Notification bell */}
-            <button className="relative p-1.5 rounded-md hover:bg-accent">
+            <button
+              className="relative p-1.5 rounded-md hover:bg-accent"
+              onClick={() => navigate('/notifications')}
+            >
               <Bell size={18} />
               <span className="absolute top-0.5 right-0.5 h-2 w-2 rounded-full bg-destructive" />
             </button>

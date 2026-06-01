@@ -1,0 +1,257 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "HMS: Start Session",
+			"type": "shell",
+			"command": "echo 'Read CLAUDE.md and .ai/rules.md before starting.' | pbcopy && echo '✅ Session starter copied to clipboard. Paste it into Claude Code to begin.'",
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"clear": true
+			},
+			"group": "none"
+		},
+		{
+			"label": "HMS: Run Prompt p04a",
+			"type": "shell",
+			"command": "bash scripts/run-prompt.sh p04a-invoice-detail-backend",
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"clear": true
+			}
+		},
+		{
+			"label": "HMS: Run Prompt p04b",
+			"type": "shell",
+			"command": "bash scripts/run-prompt.sh p04b-invoice-detail-frontend",
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"clear": true
+			}
+		},
+		{
+			"label": "HMS: Run Prompt p05a",
+			"type": "shell",
+			"command": "bash scripts/run-prompt.sh p05a-edit-invoice-backend",
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"clear": true
+			}
+		},
+		{
+			"label": "HMS: Run Prompt p05b",
+			"type": "shell",
+			"command": "bash scripts/run-prompt.sh p05b-edit-invoice-frontend",
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"clear": true
+			}
+		},
+		{
+			"label": "HMS: Run Prompt p06a",
+			"type": "shell",
+			"command": "bash scripts/run-prompt.sh p06a-review-backend",
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"clear": true
+			}
+		},
+		{
+			"label": "HMS: Run Prompt p06b",
+			"type": "shell",
+			"command": "bash scripts/run-prompt.sh p06b-review-frontend",
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"clear": true
+			}
+		},
+		{
+			"label": "HMS: Run Prompt p07",
+			"type": "shell",
+			"command": "bash scripts/run-prompt.sh p07-user-dept-management",
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"clear": true
+			}
+		},
+		{
+			"label": "HMS: Run Prompt p08",
+			"type": "shell",
+			"command": "bash scripts/run-prompt.sh p08-grn-sync",
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"clear": true
+			}
+		},
+		{
+			"label": "HMS: Run Prompt p09",
+			"type": "shell",
+			"command": "bash scripts/run-prompt.sh p09-reconciliation",
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"clear": true
+			}
+		},
+		{
+			"label": "HMS: Run Prompt p10",
+			"type": "shell",
+			"command": "bash scripts/run-prompt.sh p10-payments",
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"clear": true
+			}
+		},
+		{
+			"label": "HMS: Run Prompt p11",
+			"type": "shell",
+			"command": "bash scripts/run-prompt.sh p11-ledger-dashboard-reports",
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"clear": true
+			}
+		},
+		{
+			"label": "HMS: Run Prompt p12",
+			"type": "shell",
+			"command": "bash scripts/run-prompt.sh p12-notifications-layout",
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"clear": true
+			}
+		},
+		{
+			"label": "HMS: Run Prompt p13",
+			"type": "shell",
+			"command": "bash scripts/run-prompt.sh p13-polish-deploy",
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"clear": true
+			}
+		},
+		{
+			"label": "HMS: Update CLAUDE.md (auto-scan new files)",
+			"type": "shell",
+			"command": "bash scripts/update-claude-md.sh",
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"clear": true
+			}
+		},
+		{
+			"label": "HMS: Check What's Done",
+			"type": "shell",
+			"command": "bash scripts/check-progress.sh",
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"clear": true
+			}
+		},
+		{
+			"label": "HMS: Compact + Continue (copy to clipboard)",
+			"type": "shell",
+			"command": "echo '/compact' | pbcopy && echo '✅ /compact copied. Paste into Claude Code, then continue.'",
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"clear": true
+			}
+		},
+		{
+			"label": "HMS: Fix Only (copy template)",
+			"type": "shell",
+			"command": "cat .ai/templates/fix-only.md | pbcopy && echo '✅ Fix-only template copied to clipboard.'",
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"clear": true
+			}
+		},
+		{
+			"label": "HMS: Verify Backend Checklist",
+			"type": "shell",
+			"command": "cat .ai/checklists/backend.md | pbcopy && echo '✅ Backend checklist copied. Paste into Claude Code to verify.'",
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"clear": true
+			}
+		},
+		{
+			"label": "HMS: Verify Frontend Checklist",
+			"type": "shell",
+			"command": "cat .ai/checklists/frontend.md | pbcopy && echo '✅ Frontend checklist copied. Paste into Claude Code to verify.'",
+			"problemMatcher": [],
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared",
+				"clear": true
+			}
+		},
+		{
+			"label": "HMS: Dev (API + Web)",
+			"dependsOn": [
+				"HMS: Start API",
+				"HMS: Start Web"
+			],
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			}
+		},
+		{
+			"label": "HMS: Start API",
+			"type": "shell",
+			"command": "pnpm --filter api dev",
+			"presentation": {
+				"reveal": "always",
+				"panel": "new",
+				"group": "dev"
+			}
+		},
+		{
+			"label": "HMS: Start Web",
+			"type": "shell",
+			"command": "pnpm --filter web dev",
+			"presentation": {
+				"reveal": "always",
+				"panel": "new",
+				"group": "dev"
+			}
+		}
+	]
+}

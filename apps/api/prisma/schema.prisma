@@ -3,8 +3,9 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 enum Role {
@@ -89,16 +90,21 @@ model Department {
 }
 
 model Vendor {
-  id          String   @id @default(uuid())
-  name        String
-  contactName String?
-  phone       String?
-  email       String?
-  gstNumber   String?
-  bankDetails Json?
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id                String    @id @default(uuid())
+  name              String
+  contactName       String?
+  phone             String?
+  email             String?
+  gstNumber         String?
+  bankName          String?
+  bankAccountNumber String?
+  bankIfscCode      String?
+  bankAccountName   String?
+  bankBranch        String?
+  isActive          Boolean   @default(true)
+  deletedAt         DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
   invoices  Invoice[]
   grnMaster GrnMaster[]
@@ -106,6 +112,7 @@ model Vendor {
 
   @@index([name])
   @@index([isActive])
+  @@index([deletedAt])
 }
 
 model User {
@@ -126,6 +133,7 @@ model User {
   reconResolutions    ReconResult[]
   payments            Payment[]
   auditLogs           AuditLog[]
+  notifications       Notification[]
 
   @@index([email])
   @@index([role])
@@ -372,5 +380,22 @@ model AuditLog {
 
   @@index([userId])
   @@index([entityType, entityId])
+  @@index([createdAt])
+}
+
+model Notification {
+  id         String   @id @default(uuid())
+  userId     String
+  title      String
+  message    String
+  type       String
+  entityType String?
+  entityId   String?
+  isRead     Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId, isRead])
   @@index([createdAt])
 }

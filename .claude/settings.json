@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pnpm*)",
+      "Bash(npx*)",
+      "Bash(node*)",
+      "Bash(mkdir*)",
+      "Bash(cp*)",
+      "Bash(mv*)",
+      "Bash(cat*)",
+      "Bash(ls*)",
+      "Bash(touch*)",
+      "Bash(echo*)",
+      "Bash(grep*)",
+      "Bash(find*)",
+      "Bash(git add*)",
+      "Bash(git commit*)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git checkout*)",
+      "Bash(git branch*)"
+    ],
+    "deny": [
+      "Bash(git push*)",
+      "Bash(curl*)",
+      "Bash(wget*)",
+      "Bash(ssh*)",
+      "Bash(rm -rf /*)"
+    ]
+  }
+}

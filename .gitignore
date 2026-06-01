@@ -9,3 +9,8 @@ dist
 .env.local
 *.log
 .DS_Store
+
+# VS Code personal settings (machine-specific)
+.vscode/settings.json
+.vscode/launch.json
+.vscode/keybindings-to-add.json
