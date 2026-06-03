@@ -30,12 +30,35 @@ interface GrnEntry {
   status: string
 }
 
+interface GrnSnapshotItem {
+  grnNumber: string
+  grnAmount: string
+  grnDate: string | null
+}
+
+interface InvoiceChangeItem {
+  field: string
+  oldValue: string
+  newValue: string
+}
+
+interface GrnChangeItem {
+  grnNumber: string
+  changeType: 'added' | 'removed' | 'updated'
+  field?: string
+  oldValue?: string
+  newValue?: string
+}
+
 interface InvoiceVersion {
   id: string
   versionNo: number
   invoiceAmount: string
   statusAtChange: string
   changeReason: string | null
+  changeSummary: { invoiceChanges: InvoiceChangeItem[]; grnChanges: GrnChangeItem[] } | null
+  grnSnapshot: GrnSnapshotItem[] | null
+  changedByUser: { id: string; name: string }
   createdAt: string
 }
 
@@ -49,7 +72,9 @@ interface ReviewInvoice {
   miscDescription: string | null
   status: InvoiceStatus
   isPriceRevised: boolean
+  currentVersionNo: number
   fileUrl: string | null
+  fileType: 'image' | 'pdf' | null
   reviewerNote: string | null
   createdAt: string
   vendor: { id: string; name: string; phone: string | null; email: string | null }
@@ -178,6 +203,69 @@ function SendBackDialog({ open, onClose, onConfirm, isPending }: SendBackDialogP
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  )
+}
+
+// ── Version History ───────────────────────────────────────────────────────────
+
+function VersionChangeList({ version }: { version: InvoiceVersion }) {
+  if (version.versionNo === 1) {
+    const grns = version.grnSnapshot ?? []
+    return (
+      <div className="mt-1.5 space-y-0.5">
+        <p className="text-xs text-muted-foreground">📄 Initial upload</p>
+        {grns.map((g) => (
+          <p key={g.grnNumber} className="text-xs text-muted-foreground">
+            ➕ GRN {g.grnNumber} — {formatIndianCurrency(g.grnAmount)}
+            {g.grnDate ? ` · ${format(parseISO(g.grnDate), 'd MMM yyyy')}` : ''}
+          </p>
+        ))}
+      </div>
+    )
+  }
+
+  if (!version.changeSummary) {
+    return (
+      <p className="text-xs text-muted-foreground italic mt-1">
+        Version created — details not available
+      </p>
+    )
+  }
+
+  const { invoiceChanges, grnChanges } = version.changeSummary
+  if (invoiceChanges.length === 0 && grnChanges.length === 0) {
+    return (
+      <p className="text-xs text-muted-foreground italic mt-1">No field changes detected</p>
+    )
+  }
+
+  return (
+    <div className="mt-1.5 space-y-0.5">
+      {invoiceChanges.map((c, i) => (
+        <p key={i} className="text-xs text-muted-foreground">
+          {c.field === 'invoiceAmount'
+            ? `💰 Invoice amount changed from ${c.oldValue} to ${c.newValue}`
+            : c.field === 'invoiceDate'
+              ? `📅 Invoice date changed from ${c.oldValue} to ${c.newValue}`
+              : c.field === 'fileUrl'
+                ? '🖼️ Invoice image updated'
+                : `${c.field} changed from ${c.oldValue} to ${c.newValue}`}
+        </p>
+      ))}
+      {grnChanges.map((c, i) => (
+        <p key={i} className="text-xs text-muted-foreground">
+          {c.changeType === 'added'
+            ? `➕ GRN ${c.grnNumber} added — ${c.newValue}`
+            : c.changeType === 'removed'
+              ? `➖ GRN ${c.grnNumber} removed`
+              : c.field === 'grnAmount'
+                ? `✏️ GRN ${c.grnNumber} amount updated from ${c.oldValue} to ${c.newValue}`
+                : c.field === 'grnDate'
+                  ? `📅 GRN ${c.grnNumber} date changed from ${c.oldValue} to ${c.newValue}`
+                  : `✏️ GRN ${c.grnNumber} updated`}
+        </p>
+      ))}
+    </div>
   )
 }
 
@@ -311,6 +399,18 @@ export default function ReviewDetailPage() {
         </div>
       )}
 
+      {/* Invoice image preview */}
+      {invoice.fileUrl && invoice.fileType === 'image' && (
+        <div className="rounded-lg border overflow-hidden bg-muted">
+          <img
+            src={invoice.fileUrl}
+            alt="Invoice"
+            className="w-full object-contain max-h-96"
+            onError={() => queryClient.invalidateQueries({ queryKey: ['invoice', id] })}
+          />
+        </div>
+      )}
+
       {/* Invoice details */}
       <div className="rounded-lg border bg-card">
         <div className="px-4 py-3 border-b flex items-center justify-between">
@@ -337,10 +437,15 @@ export default function ReviewDetailPage() {
               <Badge className="border-transparent bg-yellow-100 text-yellow-800 text-xs">
                 {invoice.status === 're_submitted' ? 'Re-submitted' : 'Pending Review'}
               </Badge>
-              {invoice.isPriceRevised && (
-                <Badge className="border-transparent bg-orange-100 text-orange-800 text-xs">
-                  Price Revised
-                </Badge>
+              {invoice.versions.length > 1 && (
+                <button
+                  onClick={() =>
+                    document.getElementById('version-history')?.scrollIntoView({ behavior: 'smooth' })
+                  }
+                  className="text-xs text-primary underline underline-offset-2"
+                >
+                  Changes made — view history
+                </button>
               )}
             </div>
           </div>
@@ -410,28 +515,30 @@ export default function ReviewDetailPage() {
         </div>
       )}
 
-      {/* Version history (if price revised) */}
-      {invoice.isPriceRevised && invoice.versions.length > 0 && (
-        <div className="rounded-lg border bg-card">
+      {/* Version history */}
+      {invoice.versions.length > 0 && (
+        <div id="version-history" className="rounded-lg border bg-card">
           <div className="px-4 py-3 border-b">
-            <h2 className="font-medium text-sm">Revision History</h2>
+            <h2 className="font-medium text-sm">Version History</h2>
           </div>
-          <div className="px-4 py-4 space-y-2">
+          <div className="px-4 py-4 space-y-4">
             {invoice.versions.map((v) => (
               <div key={v.id} className="flex items-start gap-3">
                 <div className="mt-0.5 h-5 w-5 flex items-center justify-center rounded-full bg-muted text-xs font-medium shrink-0">
                   {v.versionNo}
                 </div>
-                <div className="flex-1">
+                <div className="flex-1 min-w-0">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-sm font-medium">{formatIndianCurrency(v.invoiceAmount)}</span>
                     <span className="text-xs text-muted-foreground">
                       {format(parseISO(v.createdAt), 'd MMM yyyy, HH:mm')}
                     </span>
                   </div>
-                  {v.changeReason && (
-                    <p className="text-xs text-muted-foreground mt-0.5">{v.changeReason}</p>
-                  )}
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    by {v.changedByUser.name}
+                    {v.changeReason ? ` · ${v.changeReason}` : ''}
+                  </p>
+                  <VersionChangeList version={v} />
                 </div>
               </div>
             ))}

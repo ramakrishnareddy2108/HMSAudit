@@ -24,7 +24,9 @@ export function useLogin() {
     },
     onSuccess: (data) => {
       setAuth(data.user, data.token)
-      if (data.user.role === 'admin') {
+      if (data.user.isSuperAdmin) {
+        navigate('/super/dashboard')
+      } else if (data.user.role === 'admin') {
         navigate('/admin/dashboard')
       } else if (data.user.role === 'role_2') {
         navigate('/review')

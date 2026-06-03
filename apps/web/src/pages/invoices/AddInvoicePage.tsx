@@ -5,6 +5,7 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { useQuery } from '@tanstack/react-query'
 import { format, parseISO } from 'date-fns'
+import { toast } from 'sonner'
 import {
   Upload,
   FileText,
@@ -15,6 +16,9 @@ import {
   Trash2,
   ArrowLeft,
   Check,
+  Loader2,
+  Wand2,
+  Lock,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -28,6 +32,12 @@ import type { WizardState, GrnRow } from '@/components/invoices/ReviewSubmitStep
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 interface Vendor {
+  id: string
+  name: string
+  isActive: boolean
+}
+
+interface Department {
   id: string
   name: string
   isActive: boolean
@@ -53,6 +63,26 @@ interface GrnCheckResult {
     uploadedBy: string
   }
 }
+
+interface OcrFieldConfidence {
+  vendorName: number
+  invoiceNumber: number
+  invoiceDate: number
+  invoiceAmount: number
+}
+
+interface OcrApiResponse {
+  vendorName: string | null
+  invoiceNumber: string | null
+  invoiceDate: string | null
+  invoiceAmount: number | null
+  currency: string | null
+  confidence: OcrFieldConfidence
+  rawText: string
+  modelUsed: string
+}
+
+type OcrMeta = Partial<Record<'vendorId' | 'invoiceNumber' | 'invoiceDate' | 'invoiceAmount', number>>
 
 // ── Wizard reducer ────────────────────────────────────────────────────────────
 
@@ -206,6 +236,12 @@ function StepIndicator({
   )
 }
 
+async function hashFile(file: File): Promise<string> {
+  const buf = await file.arrayBuffer()
+  const digest = await crypto.subtle.digest('SHA-256', buf)
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('')
+}
+
 // ── Page component ────────────────────────────────────────────────────────────
 
 export default function AddInvoicePage() {
@@ -228,6 +264,12 @@ export default function AddInvoicePage() {
     invoiceNumber: string
   } | null>(null)
 
+  // OCR state
+  const [ocrLoading, setOcrLoading] = useState(false)
+  const [ocrResult, setOcrResult] = useState<OcrApiResponse | null>(null)
+  const [ocrMeta, setOcrMeta] = useState<OcrMeta>({})
+  const [ocrSuggestedVendorName, setOcrSuggestedVendorName] = useState('')
+
   // Step 2 — GRN add form
   const [grnForm, setGrnForm] = useState({ grnNumber: '', grnAmount: '', grnDate: '' })
   const [grnFormError, setGrnFormError] = useState('')
@@ -238,6 +280,7 @@ export default function AddInvoicePage() {
     register,
     handleSubmit,
     watch,
+    setValue,
     formState: { errors },
   } = useForm<FormValues>({
     resolver: zodResolver(formSchema),
@@ -265,6 +308,13 @@ export default function AddInvoicePage() {
       api.get('/vendors', { params: { isActive: true, limit: 200 } }).then((r) => r.data),
   })
   const vendors = vendorsData?.data ?? []
+
+  const { data: allDepartments = [] } = useQuery<Department[]>({
+    queryKey: ['departments-all'],
+    queryFn: () =>
+      api.get('/departments', { params: { isActive: true } }).then((r) => r.data),
+    enabled: user?.role !== 'role_1',
+  })
 
   const { data: dupResult } = useQuery<DuplicateResult>({
     queryKey: ['invoice-dup', dupCheckKey],
@@ -310,6 +360,12 @@ export default function AddInvoicePage() {
     return () => clearTimeout(id)
   }, [grnForm.grnNumber])
 
+  useEffect(() => {
+    if (user?.role === 'role_1' && user.departments?.[0]?.id) {
+      setValue('departmentId', user.departments[0].id)
+    }
+  }, [])
+
   // ── File handlers ────────────────────────────────────────────────────────
 
   function handleFile(f: File) {
@@ -323,6 +379,62 @@ export default function AddInvoicePage() {
     }
     setFileError('')
     setFile(f)
+    setOcrResult(null)
+    setOcrMeta({})
+    setOcrSuggestedVendorName('')
+    void triggerOcr(f)
+  }
+
+  function applyOcrResult(result: OcrApiResponse) {
+    const newMeta: OcrMeta = {}
+    if (result.invoiceNumber) {
+      setValue('invoiceNumber', result.invoiceNumber, { shouldValidate: true })
+      newMeta.invoiceNumber = result.confidence.invoiceNumber
+    }
+    if (result.invoiceDate) {
+      setValue('invoiceDate', result.invoiceDate, { shouldValidate: true })
+      newMeta.invoiceDate = result.confidence.invoiceDate
+    }
+    if (result.invoiceAmount !== null) {
+      setValue('invoiceAmount', String(result.invoiceAmount), { shouldValidate: true })
+      newMeta.invoiceAmount = result.confidence.invoiceAmount
+    }
+    if (result.vendorName) {
+      setOcrSuggestedVendorName(result.vendorName)
+      const match = vendors.find(
+        (v) => v.name.toLowerCase() === result.vendorName!.toLowerCase(),
+      )
+      if (match) {
+        setValue('vendorId', match.id, { shouldValidate: true })
+        newMeta.vendorId = result.confidence.vendorName
+      }
+    }
+    setOcrMeta(newMeta)
+  }
+
+  async function triggerOcr(f: File) {
+    setOcrLoading(true)
+    try {
+      const hash = await hashFile(f)
+      const cacheKey = `ocr_${hash}`
+      const cached = sessionStorage.getItem(cacheKey)
+      if (cached) {
+        const result = JSON.parse(cached) as OcrApiResponse
+        setOcrResult(result)
+        applyOcrResult(result)
+        return
+      }
+      const fd = new FormData()
+      fd.append('file', f, f.name)
+      const { data } = await api.post<OcrApiResponse>('/invoices/ocr-preview', fd)
+      sessionStorage.setItem(cacheKey, JSON.stringify(data))
+      setOcrResult(data)
+      applyOcrResult(data)
+    } catch {
+      toast.error('Could not read invoice. Please fill manually.')
+    } finally {
+      setOcrLoading(false)
+    }
   }
 
   function onDrop(e: React.DragEvent) {
@@ -340,7 +452,10 @@ export default function AddInvoicePage() {
       return
     }
     const vendor = vendors.find((v) => v.id === values.vendorId)
-    const dept = user?.departments?.find((d) => d.id === values.departmentId)
+    const dept =
+      user?.role === 'role_1'
+        ? user.departments?.find((d) => d.id === values.departmentId)
+        : allDepartments.find((d) => d.id === values.departmentId)
     dispatch({
       type: 'set_step1',
       payload: {
@@ -427,7 +542,12 @@ export default function AddInvoicePage() {
                 </div>
                 <button
                   type="button"
-                  onClick={() => setFile(null)}
+                  onClick={() => {
+                    setFile(null)
+                    setOcrResult(null)
+                    setOcrMeta({})
+                    setOcrSuggestedVendorName('')
+                  }}
                   className="rounded p-1 hover:bg-accent"
                 >
                   <X size={16} />
@@ -471,19 +591,46 @@ export default function AddInvoicePage() {
               </div>
             )}
             {fileError && <p className="text-xs text-destructive">{fileError}</p>}
+            {file && (ocrLoading || ocrResult) && (
+              <div className="mt-1">
+                {ocrLoading ? (
+                  <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <Loader2 size={12} className="animate-spin" />
+                    Reading your invoice...
+                  </p>
+                ) : (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="h-7 gap-1.5 text-xs"
+                    onClick={() => ocrResult && applyOcrResult(ocrResult)}
+                  >
+                    <Wand2 size={12} />
+                    Auto-fill from invoice
+                  </Button>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Vendor */}
           <div className="space-y-1.5">
-            <Label htmlFor="vendorId">
-              Vendor <span className="text-destructive">*</span>
-            </Label>
+            <div className="flex items-center gap-1.5">
+              <Label htmlFor="vendorId">
+                Vendor <span className="text-destructive">*</span>
+              </Label>
+              {ocrMeta.vendorId !== undefined && ocrMeta.vendorId >= 0.7 && (
+                <CheckCircle2 size={13} className="text-green-500" />
+              )}
+            </div>
             <select
               id="vendorId"
               {...register('vendorId')}
               className={cn(
                 'flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm focus:outline-none focus:ring-1 focus:ring-ring',
                 errors.vendorId && 'border-destructive',
+                ocrMeta.vendorId !== undefined && ocrMeta.vendorId < 0.7 && 'border-amber-400',
               )}
             >
               <option value="">— Select vendor —</option>
@@ -493,6 +640,14 @@ export default function AddInvoicePage() {
                 </option>
               ))}
             </select>
+            {ocrMeta.vendorId !== undefined && ocrMeta.vendorId < 0.7 && (
+              <p className="text-xs text-amber-600">Please verify</p>
+            )}
+            {ocrSuggestedVendorName && ocrMeta.vendorId === undefined && (
+              <p className="text-xs text-amber-600">
+                OCR detected: &ldquo;{ocrSuggestedVendorName}&rdquo; — select manually
+              </p>
+            )}
             {errors.vendorId && (
               <p className="text-xs text-destructive">{errors.vendorId.message}</p>
             )}
@@ -501,22 +656,48 @@ export default function AddInvoicePage() {
           {/* Invoice number + date */}
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
-              <Label htmlFor="invoiceNumber">
-                Invoice Number <span className="text-destructive">*</span>
-              </Label>
+              <div className="flex items-center gap-1.5">
+                <Label htmlFor="invoiceNumber">
+                  Invoice Number <span className="text-destructive">*</span>
+                </Label>
+                {ocrMeta.invoiceNumber !== undefined && ocrMeta.invoiceNumber >= 0.7 && (
+                  <CheckCircle2 size={13} className="text-green-500" />
+                )}
+              </div>
               <Input
                 id="invoiceNumber"
                 {...register('invoiceNumber')}
                 placeholder="INV-2024-001"
-                className={cn(errors.invoiceNumber && 'border-destructive')}
+                className={cn(
+                  errors.invoiceNumber && 'border-destructive',
+                  ocrMeta.invoiceNumber !== undefined && ocrMeta.invoiceNumber < 0.7 && 'border-amber-400',
+                )}
               />
+              {ocrMeta.invoiceNumber !== undefined && ocrMeta.invoiceNumber < 0.7 && (
+                <p className="text-xs text-amber-600">Please verify</p>
+              )}
               {errors.invoiceNumber && (
                 <p className="text-xs text-destructive">{errors.invoiceNumber.message}</p>
               )}
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="invoiceDate">Invoice Date</Label>
-              <Input id="invoiceDate" type="date" {...register('invoiceDate')} />
+              <div className="flex items-center gap-1.5">
+                <Label htmlFor="invoiceDate">Invoice Date</Label>
+                {ocrMeta.invoiceDate !== undefined && ocrMeta.invoiceDate >= 0.7 && (
+                  <CheckCircle2 size={13} className="text-green-500" />
+                )}
+              </div>
+              <Input
+                id="invoiceDate"
+                type="date"
+                {...register('invoiceDate')}
+                className={cn(
+                  ocrMeta.invoiceDate !== undefined && ocrMeta.invoiceDate < 0.7 && 'border-amber-400',
+                )}
+              />
+              {ocrMeta.invoiceDate !== undefined && ocrMeta.invoiceDate < 0.7 && (
+                <p className="text-xs text-amber-600">Please verify</p>
+              )}
             </div>
           </div>
 
@@ -547,9 +728,14 @@ export default function AddInvoicePage() {
 
           {/* Amount */}
           <div className="space-y-1.5">
-            <Label htmlFor="invoiceAmount">
-              Invoice Amount (₹) <span className="text-destructive">*</span>
-            </Label>
+            <div className="flex items-center gap-1.5">
+              <Label htmlFor="invoiceAmount">
+                Invoice Amount (₹) <span className="text-destructive">*</span>
+              </Label>
+              {ocrMeta.invoiceAmount !== undefined && ocrMeta.invoiceAmount >= 0.7 && (
+                <CheckCircle2 size={13} className="text-green-500" />
+              )}
+            </div>
             <Input
               id="invoiceAmount"
               {...register('invoiceAmount')}
@@ -557,15 +743,31 @@ export default function AddInvoicePage() {
               step="0.01"
               min="0.01"
               placeholder="0.00"
-              className={cn(errors.invoiceAmount && 'border-destructive')}
+              className={cn(
+                errors.invoiceAmount && 'border-destructive',
+                ocrMeta.invoiceAmount !== undefined && ocrMeta.invoiceAmount < 0.7 && 'border-amber-400',
+              )}
             />
+            {ocrMeta.invoiceAmount !== undefined && ocrMeta.invoiceAmount < 0.7 && (
+              <p className="text-xs text-amber-600">Please verify</p>
+            )}
             {errors.invoiceAmount && (
               <p className="text-xs text-destructive">{errors.invoiceAmount.message}</p>
             )}
           </div>
 
           {/* Department */}
-          {user?.departments && user.departments.length > 0 && (
+          {user?.role === 'role_1' ? (
+            user.departments?.[0] && (
+              <div className="space-y-1.5">
+                <Label>Department</Label>
+                <div className="flex h-9 items-center gap-2 rounded-md border border-input bg-muted/40 px-3 text-sm text-muted-foreground">
+                  <Lock size={13} className="shrink-0" />
+                  <span>{user.departments[0].name}</span>
+                </div>
+              </div>
+            )
+          ) : (
             <div className="space-y-1.5">
               <Label htmlFor="departmentId">Department</Label>
               <select
@@ -574,7 +776,7 @@ export default function AddInvoicePage() {
                 className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
               >
                 <option value="">— No department —</option>
-                {user.departments.map((d) => (
+                {allDepartments.map((d) => (
                   <option key={d.id} value={d.id}>
                     {d.name}
                   </option>

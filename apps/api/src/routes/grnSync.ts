@@ -1,8 +1,10 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { z } from 'zod'
-import { User } from '@prisma/client'
+import { Prisma, User } from '@prisma/client'
 import { authenticate, requireRole } from '../middleware/auth'
 import { excelService } from '../services/excelService'
+import { storageService } from '../services/storageService'
+import { AUDIT_LOG_ENABLED } from '../constants'
 
 const syncRunIdParamsSchema = z.object({
   id: z.string().uuid(),
@@ -23,13 +25,24 @@ const listQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(100).default(20),
 })
 
+const searchQuerySchema = z.object({
+  vendorId: z.string().uuid().optional(),
+  search: z.string().optional(),
+  month: z.coerce.number().int().min(1).max(12).optional(),
+  year: z.coerce.number().int().min(2000).max(2100).optional(),
+  limit: z.coerce.number().int().positive().max(50).default(20),
+})
+
 const ALLOWED_EXCEL_EXTENSIONS = ['.xlsx', '.xls']
 
 export default async function grnSyncRoutes(fastify: FastifyInstance) {
   // POST /grn-sync/upload
   fastify.post(
     '/upload',
-    { preHandler: [authenticate, requireRole('admin')] },
+    {
+      schema: { tags: ['GRN Sync'], summary: 'Upload GRN Excel file' },
+      preHandler: [authenticate, requireRole('admin')],
+    },
     async (request: FastifyRequest, reply: FastifyReply) => {
       const userId = (request.user as User).id
       let fileBuffer: Buffer | null = null
@@ -52,9 +65,9 @@ export default async function grnSyncRoutes(fastify: FastifyInstance) {
 
       if (!fileBuffer) return reply.code(400).send({ error: 'Excel file is required' })
 
-      let rows: ReturnType<typeof excelService.parseGrnExcel>
+      let parsedRows: ReturnType<typeof excelService.parseGrnExcel>
       try {
-        rows = excelService.parseGrnExcel(fileBuffer)
+        parsedRows = excelService.parseGrnExcel(fileBuffer)
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Failed to parse Excel file'
         return reply.code(400).send({ error: msg })
@@ -63,40 +76,39 @@ export default async function grnSyncRoutes(fastify: FastifyInstance) {
       const ext = originalFilename.endsWith('.xls') && !originalFilename.endsWith('.xlsx')
         ? '.xls'
         : '.xlsx'
-      const storagePath = `grn-excel/${userId}/${Date.now()}${ext}`
       const contentType =
         ext === '.xlsx'
           ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
           : 'application/vnd.ms-excel'
 
-      const { error: uploadError } = await fastify.supabase.storage
-        .from('invoices')
-        .upload(storagePath, fileBuffer, { contentType, upsert: false })
-
-      if (uploadError) {
-        return reply.code(500).send({ error: 'File upload failed: ' + uploadError.message })
+      let fileUrl: string | null = null
+      try {
+        const result = await storageService.uploadFile({
+          buffer: fileBuffer,
+          filename: `grn${ext}`,
+          mimetype: contentType,
+          folder: `grn-excel/${userId}`,
+        })
+        fileUrl = result.path
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'File upload failed'
+        return reply.code(500).send({ error: msg })
       }
-
-      const { data: signedData } = await fastify.supabase.storage
-        .from('invoices')
-        .createSignedUrl(storagePath, 60 * 60 * 24 * 365)
-
-      const fileUrl = signedData?.signedUrl ?? null
 
       const syncRun = await fastify.prisma.grnSyncRun.create({
         data: {
           runBy: userId,
           fileUrl,
-          totalRows: rows.length,
+          totalRows: parsedRows.length,
           status: 'processing',
-        },
+        } as unknown as Prisma.GrnSyncRunUncheckedCreateInput,
       })
 
       let inserted = 0
       let skipped = 0
       let conflicts = 0
 
-      for (const row of rows) {
+      for (const { mapped: row, raw } of parsedRows) {
         if (!row.vendorName) {
           fastify.log.warn({ grnNumber: row.grnNumber }, 'GRN row missing vendor name, skipping')
           continue
@@ -106,7 +118,7 @@ export default async function grnSyncRoutes(fastify: FastifyInstance) {
           where: {
             name: { equals: row.vendorName, mode: 'insensitive' },
             isActive: true,
-            deletedAt: null,
+            isDeleted: false,
           },
         })
 
@@ -133,7 +145,8 @@ export default async function grnSyncRoutes(fastify: FastifyInstance) {
                   grnAmount: row.grnAmount,
                   grnDate: row.grnDate ? new Date(row.grnDate) : null,
                   syncRunId: syncRun.id,
-                },
+                  rawExcelData: raw,
+                } as unknown as Prisma.GrnMasterUncheckedCreateInput,
               })
               return 'inserted' as const
             }
@@ -147,7 +160,8 @@ export default async function grnSyncRoutes(fastify: FastifyInstance) {
                 grnNumber: row.grnNumber,
                 systemAmount: Number(existing.grnAmount),
                 excelAmount: row.grnAmount,
-              },
+                rawExcelData: raw,
+              } as unknown as Prisma.GrnConflictUncheckedCreateInput,
             })
             return 'conflict' as const
           })
@@ -174,7 +188,10 @@ export default async function grnSyncRoutes(fastify: FastifyInstance) {
   // GET /grn-sync/runs
   fastify.get(
     '/runs',
-    { preHandler: [authenticate, requireRole('admin')] },
+    {
+      schema: { tags: ['GRN Sync'], summary: 'List GRN sync runs' },
+      preHandler: [authenticate, requireRole('admin')],
+    },
     async (request: FastifyRequest, _reply: FastifyReply) => {
       const { page, limit } = listQuerySchema.parse(request.query)
       const skip = (page - 1) * limit
@@ -198,10 +215,84 @@ export default async function grnSyncRoutes(fastify: FastifyInstance) {
     },
   )
 
+  // GET /grn-sync/search
+  fastify.get(
+    '/search',
+    {
+      schema: { tags: ['GRN Sync'], summary: 'Search GRN master records' },
+      preHandler: [authenticate, requireRole('admin')],
+    },
+    async (request: FastifyRequest, _reply: FastifyReply) => {
+      const { vendorId, search, month, year, limit } = searchQuerySchema.parse(request.query)
+      const hospitalId = (request.user as User & { activeHospitalId: string }).activeHospitalId
+
+      const where: Prisma.GrnMasterWhereInput = { hospitalId }
+
+      if (vendorId) where.vendorId = vendorId
+
+      if (search && search.trim().length >= 2) {
+        const term = search.trim()
+        where.OR = [
+          { grnNumber: { contains: term, mode: 'insensitive' } },
+          { invoiceNumber: { contains: term, mode: 'insensitive' } },
+          { grnAmount: { equals: isNaN(Number(term)) ? undefined : Number(term) } },
+        ]
+      }
+
+      if (month && year) {
+        const start = new Date(year, month - 1, 1)
+        const end = new Date(year, month, 1)
+        where.grnDate = { gte: start, lt: end }
+      }
+
+      const rows = await fastify.prisma.grnMaster.findMany({
+        where,
+        take: limit,
+        orderBy: { grnDate: 'desc' },
+        include: {
+          vendor: { select: { id: true, name: true } },
+        },
+      })
+
+      const grnNumbers = rows.map((r) => r.grnNumber)
+      const matchedEntries = grnNumbers.length > 0
+        ? await fastify.prisma.grnEntry.findMany({
+            where: { grnNumber: { in: grnNumbers }, isDeleted: false },
+            select: { grnNumber: true },
+          })
+        : []
+      const matchedSet = new Set(matchedEntries.map((e) => e.grnNumber))
+
+      const data = rows.map((row) => {
+        const extra = (row.rawExcelData ?? {}) as Record<string, unknown>
+        return {
+          id: row.id,
+          grnNumber: row.grnNumber,
+          invoiceNumber: row.invoiceNumber,
+          grnDate: row.grnDate,
+          grnAmount: row.grnAmount,
+          vendor: row.vendor ? { id: row.vendor.id, name: row.vendor.name } : null,
+          poNumber: extra['PO Number'] ?? extra['po_number'] ?? extra['poNumber'] ?? null,
+          dcNumber: extra['DC Number'] ?? extra['dc_number'] ?? extra['dcNumber'] ?? null,
+          qtyOrdered: extra['Qty Ordered'] ?? extra['qty_ordered'] ?? extra['qtyOrdered'] ?? null,
+          qtyReceived: extra['Qty Received'] ?? extra['qty_received'] ?? extra['qtyReceived'] ?? null,
+          storesLocation: extra['Stores Location'] ?? extra['stores_location'] ?? extra['storesLocation'] ?? null,
+          cashOrCredit: extra['Cash/Credit'] ?? extra['cash_or_credit'] ?? extra['cashOrCredit'] ?? null,
+          isMatched: matchedSet.has(row.grnNumber),
+        }
+      })
+
+      return { data, total: data.length }
+    },
+  )
+
   // GET /grn-sync/runs/:id/conflicts
   fastify.get(
     '/runs/:id/conflicts',
-    { preHandler: [authenticate, requireRole('admin')] },
+    {
+      schema: { tags: ['GRN Sync'], summary: 'Get conflicts for sync run' },
+      preHandler: [authenticate, requireRole('admin')],
+    },
     async (request: FastifyRequest, reply: FastifyReply) => {
       const { id } = syncRunIdParamsSchema.parse(request.params)
 
@@ -224,7 +315,10 @@ export default async function grnSyncRoutes(fastify: FastifyInstance) {
   // POST /grn-sync/runs/:id/conflicts/:conflictId/resolve
   fastify.post(
     '/runs/:id/conflicts/:conflictId/resolve',
-    { preHandler: [authenticate, requireRole('admin')] },
+    {
+      schema: { tags: ['GRN Sync'], summary: 'Resolve GRN sync conflict' },
+      preHandler: [authenticate, requireRole('admin')],
+    },
     async (request: FastifyRequest, reply: FastifyReply) => {
       const { id, conflictId } = conflictParamsSchema.parse(request.params)
       const { resolution, adminNote } = resolveConflictBodySchema.parse(request.body)
@@ -243,7 +337,10 @@ export default async function grnSyncRoutes(fastify: FastifyInstance) {
         if (resolution === 'use_excel') {
           await tx.grnMaster.updateMany({
             where: { grnNumber: conflict.grnNumber },
-            data: { grnAmount: conflict.excelAmount },
+            data: {
+              grnAmount: conflict.excelAmount,
+              rawExcelData: conflict.rawExcelData ?? Prisma.JsonNull,
+            },
           })
         }
 
@@ -261,16 +358,18 @@ export default async function grnSyncRoutes(fastify: FastifyInstance) {
         }
       })
 
-      await fastify.prisma.auditLog.create({
-        data: {
-          userId,
-          action: 'grn_conflict_resolved',
-          entityType: 'grn_conflict',
-          entityId: conflictId,
-          newValue: { resolution, adminNote, syncRunId: id, grnNumber: conflict.grnNumber },
-          ipAddress: request.ip,
-        },
-      })
+      if (AUDIT_LOG_ENABLED) {
+        await fastify.prisma.auditLog.create({
+          data: {
+            userId,
+            action: 'grn_conflict_resolved',
+            entityType: 'grn_conflict',
+            entityId: conflictId,
+            newValue: { resolution, adminNote, syncRunId: id, grnNumber: conflict.grnNumber },
+            ipAddress: request.ip,
+          },
+        })
+      }
 
       return { success: true, resolution }
     },

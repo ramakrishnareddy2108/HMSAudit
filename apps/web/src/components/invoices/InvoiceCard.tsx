@@ -23,6 +23,8 @@ export interface Invoice {
   billType: 'grn_bill' | 'miscellaneous'
   status: InvoiceStatus
   isPriceRevised: boolean
+  isDeleted: boolean
+  deletedAt: string | null
   createdAt: string
   vendor: { id: string; name: string }
   department: { id: string; name: string } | null
@@ -96,17 +98,13 @@ export function InvoiceCard({ invoice }: InvoiceCardProps) {
     >
       {/* Row 1: vendor name + badges */}
       <div className="flex items-start justify-between gap-3">
-        <span className="font-semibold text-sm leading-snug">{invoice.vendor.name}</span>
-        <div className="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
-          {invoice.isPriceRevised && (
-            <Badge
-              className={cn(
-                'border-transparent bg-orange-100 text-orange-800',
-                'dark:bg-orange-900/30 dark:text-orange-400',
-                'text-[10px] px-1.5 py-0',
-              )}
-            >
-              Price Revised
+        <span className={cn('font-semibold text-sm leading-snug', invoice.isDeleted && 'opacity-60')}>
+          {invoice.vendor.name}
+        </span>
+        <div className="flex items-center gap-1.5 shrink-0">
+          {invoice.isDeleted && (
+            <Badge className="border-transparent bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400 text-[10px] px-1.5 py-0">
+              Deleted
             </Badge>
           )}
           <Badge className={cn(status.className, 'text-[10px] px-1.5 py-0')}>
@@ -116,7 +114,7 @@ export function InvoiceCard({ invoice }: InvoiceCardProps) {
       </div>
 
       {/* Row 2: invoice number + date */}
-      <p className="text-xs text-muted-foreground">
+      <p className={cn('text-xs text-muted-foreground', invoice.isDeleted && 'line-through opacity-60')}>
         #{invoice.invoiceNumber}
         <span className="mx-1.5 opacity-40">·</span>
         {invoiceDateLabel}

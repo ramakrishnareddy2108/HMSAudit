@@ -1,18 +1,29 @@
+import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { format, parseISO } from 'date-fns'
 import {
   ArrowLeft,
   ExternalLink,
   Pencil,
-  Clock,
   CheckCircle2,
   XCircle,
-  RefreshCw,
   Package,
+  Trash2,
+  AlertCircle,
 } from 'lucide-react'
+import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+  DialogClose,
+} from '@/components/ui/dialog'
 import { api } from '@/lib/api'
 import { useAuthStore } from '@/stores/authStore'
 import { cn } from '@/lib/utils'
@@ -28,12 +39,36 @@ interface GrnEntry {
   status: 'pending' | 'reconciled' | 'disputed' | 'paid'
 }
 
+interface GrnSnapshotItem {
+  grnNumber: string
+  grnAmount: string
+  grnDate: string | null
+}
+
+interface InvoiceChangeItem {
+  field: string
+  oldValue: string
+  newValue: string
+}
+
+interface GrnChangeItem {
+  grnNumber: string
+  changeType: 'added' | 'removed' | 'updated'
+  field?: string
+  oldValue?: string
+  newValue?: string
+}
+
 interface InvoiceVersion {
   id: string
   versionNo: number
   invoiceAmount: string
+  fileUrl: string | null
   statusAtChange: string
   changeReason: string | null
+  changeSummary: { invoiceChanges: InvoiceChangeItem[]; grnChanges: GrnChangeItem[] } | null
+  grnSnapshot: GrnSnapshotItem[] | null
+  changedByUser: { id: string; name: string }
   createdAt: string
 }
 
@@ -47,10 +82,15 @@ interface InvoiceDetail {
   miscDescription: string | null
   status: InvoiceStatus
   isPriceRevised: boolean
+  isDeleted: boolean
+  deletedAt: string | null
+  deletedBy: string | null
   ocrStatus: 'pending' | 'processing' | 'done' | 'failed'
   ocrExtractedJson: Record<string, unknown> | null
   fileUrl: string | null
+  fileType: 'image' | 'pdf' | null
   currentVersionNo: number
+  uploadedBy: string
   reviewerNote: string | null
   createdAt: string
   vendor: { id: string; name: string; phone: string | null; email: string | null }
@@ -89,31 +129,11 @@ const GRN_STATUS_CONFIG = {
 // ── OCR Status Banner ─────────────────────────────────────────────────────────
 
 function OcrBanner({ ocrStatus }: { ocrStatus: InvoiceDetail['ocrStatus'] }) {
-  if (ocrStatus === 'done') return null
-
-  const configs = {
-    pending: {
-      icon: <Clock size={15} className="shrink-0" />,
-      text: 'Waiting for OCR processing to start…',
-      className: 'bg-blue-50 text-blue-800 border-blue-200 dark:bg-blue-900/20 dark:text-blue-300 dark:border-blue-800',
-    },
-    processing: {
-      icon: <RefreshCw size={15} className="shrink-0 animate-spin" />,
-      text: 'OCR is processing the invoice — data will appear shortly.',
-      className: 'bg-blue-50 text-blue-800 border-blue-200 dark:bg-blue-900/20 dark:text-blue-300 dark:border-blue-800',
-    },
-    failed: {
-      icon: <XCircle size={15} className="shrink-0" />,
-      text: 'OCR extraction failed. Please verify invoice details manually.',
-      className: 'bg-red-50 text-red-800 border-red-200 dark:bg-red-900/20 dark:text-red-300 dark:border-red-800',
-    },
-  }
-
-  const cfg = configs[ocrStatus]
+  if (ocrStatus !== 'failed') return null
   return (
-    <div className={cn('flex items-center gap-2 rounded-lg border px-4 py-2.5 text-sm', cfg.className)}>
-      {cfg.icon}
-      {cfg.text}
+    <div className="flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2.5 text-sm text-red-800 dark:border-red-800 dark:bg-red-900/20 dark:text-red-300">
+      <XCircle size={15} className="shrink-0" />
+      OCR extraction failed. Please verify invoice details manually.
     </div>
   )
 }
@@ -140,32 +160,144 @@ function Field({ label, value }: { label: string; value: React.ReactNode }) {
   )
 }
 
+// ── Version History ───────────────────────────────────────────────────────────
+
+function VersionChangeList({ version }: { version: InvoiceVersion }) {
+  if (version.versionNo === 1) {
+    const grns = version.grnSnapshot ?? []
+    return (
+      <div className="mt-1.5 space-y-0.5">
+        <p className="text-xs text-muted-foreground">📄 Initial upload</p>
+        {grns.map((g) => (
+          <p key={g.grnNumber} className="text-xs text-muted-foreground">
+            ➕ GRN {g.grnNumber} — {formatIndianCurrency(g.grnAmount)}
+            {g.grnDate ? ` · ${format(parseISO(g.grnDate), 'd MMM yyyy')}` : ''}
+          </p>
+        ))}
+      </div>
+    )
+  }
+
+  if (!version.changeSummary) {
+    return (
+      <p className="text-xs text-muted-foreground italic mt-1">
+        Version created — details not available
+      </p>
+    )
+  }
+
+  const { invoiceChanges, grnChanges } = version.changeSummary
+  if (invoiceChanges.length === 0 && grnChanges.length === 0) {
+    return (
+      <p className="text-xs text-muted-foreground italic mt-1">No field changes detected</p>
+    )
+  }
+
+  return (
+    <div className="mt-1.5 space-y-0.5">
+      {invoiceChanges.map((c, i) => (
+        <p key={i} className="text-xs text-muted-foreground">
+          {c.field === 'invoiceAmount'
+            ? `💰 Invoice amount changed from ${c.oldValue} to ${c.newValue}`
+            : c.field === 'invoiceDate'
+              ? `📅 Invoice date changed from ${c.oldValue} to ${c.newValue}`
+              : c.field === 'fileUrl'
+                ? '🖼️ Invoice image updated'
+                : `${c.field} changed from ${c.oldValue} to ${c.newValue}`}
+        </p>
+      ))}
+      {grnChanges.map((c, i) => (
+        <p key={i} className="text-xs text-muted-foreground">
+          {c.changeType === 'added'
+            ? `➕ GRN ${c.grnNumber} added — ${c.newValue}`
+            : c.changeType === 'removed'
+              ? `➖ GRN ${c.grnNumber} removed`
+              : c.field === 'grnAmount'
+                ? `✏️ GRN ${c.grnNumber} amount updated from ${c.oldValue} to ${c.newValue}`
+                : c.field === 'grnDate'
+                  ? `📅 GRN ${c.grnNumber} date changed from ${c.oldValue} to ${c.newValue}`
+                  : `✏️ GRN ${c.grnNumber} updated`}
+        </p>
+      ))}
+    </div>
+  )
+}
+
+function VersionHistoryItem({ version }: { version: InvoiceVersion }) {
+  return (
+    <div className="flex items-start gap-3">
+      <div className="mt-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-muted text-xs font-medium shrink-0">
+        {version.versionNo}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-sm font-medium">{formatIndianCurrency(version.invoiceAmount)}</span>
+          <span className="text-xs text-muted-foreground">
+            {format(parseISO(version.createdAt), 'd MMM yyyy, HH:mm')}
+          </span>
+        </div>
+        <p className="text-xs text-muted-foreground mt-0.5">
+          by {version.changedByUser.name}
+          {version.changeReason ? ` · ${version.changeReason}` : ''}
+        </p>
+        <VersionChangeList version={version} />
+      </div>
+    </div>
+  )
+}
+
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
 export default function InvoiceDetailPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
-  const user = useAuthStore((s) => s.user)
-
-  const isOcrInProgress = (status: string) => status === 'pending' || status === 'processing'
+  const queryClient = useQueryClient()
+  const { user, isSuperAdminUser } = useAuthStore()
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
 
   const { data: invoice, isLoading, isError } = useQuery<InvoiceDetail>({
     queryKey: ['invoice', id],
     queryFn: () => api.get(`/invoices/${id}`).then((r) => r.data),
-    // Poll while OCR is in-progress
-    refetchInterval: (query) =>
-      isOcrInProgress(query.state.data?.ocrStatus ?? '') ? 4000 : false,
   })
+
+  const deleteMutation = useMutation({
+    mutationFn: () => api.delete(`/invoices/${id}`),
+    onSuccess: () => {
+      toast.success('Invoice deleted')
+      queryClient.invalidateQueries({ queryKey: ['invoices'] })
+      navigate('/invoices')
+    },
+    onError: (err: unknown) => {
+      const message =
+        (err as { response?: { data?: { error?: string } } })?.response?.data?.error ??
+        'Failed to delete invoice'
+      toast.error(message)
+    },
+  })
+
+  const isAdminUser = user?.role === 'admin' || isSuperAdminUser()
 
   const canEdit =
     invoice &&
+    !invoice.isDeleted &&
     (user?.role === 'role_1' || user?.role === 'admin') &&
     !['reconciled', 'paid'].includes(invoice.status)
 
   const canReview =
     invoice &&
+    !invoice.isDeleted &&
     (user?.role === 'role_2' || user?.role === 'admin') &&
     ['pending_review', 're_submitted'].includes(invoice.status)
+
+  const canDelete =
+    invoice &&
+    !invoice.isDeleted &&
+    (
+      (user?.role === 'role_1' &&
+        invoice.uploadedBy === user.id &&
+        !invoice.grnEntries.some((g) => g.status === 'reconciled' || g.status === 'paid')) ||
+      isAdminUser
+    )
 
   if (isLoading) {
     return (
@@ -230,11 +362,48 @@ export default function InvoiceDetailPage() {
               Review
             </Button>
           )}
+          {canDelete && (
+            <Button
+              size="sm"
+              variant="destructive"
+              onClick={() => setDeleteDialogOpen(true)}
+            >
+              <Trash2 size={14} className="mr-1.5" />
+              Delete
+            </Button>
+          )}
         </div>
       </div>
 
+      {/* Deleted banner (admin view) */}
+      {invoice.isDeleted && (
+        <div className="flex items-start gap-2 rounded-lg border border-red-300 bg-red-50 dark:bg-red-900/20 dark:border-red-700 px-4 py-3 text-sm">
+          <AlertCircle size={15} className="text-red-600 dark:text-red-400 shrink-0 mt-0.5" />
+          <div>
+            <p className="font-medium text-red-800 dark:text-red-300">Invoice deleted</p>
+            {invoice.deletedAt && (
+              <p className="text-red-700 dark:text-red-400 mt-0.5">
+                Deleted on {format(parseISO(invoice.deletedAt), 'd MMM yyyy, HH:mm')}
+              </p>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* OCR banner */}
       <OcrBanner ocrStatus={invoice.ocrStatus} />
+
+      {/* Invoice image preview */}
+      {invoice.fileUrl && invoice.fileType === 'image' && (
+        <div className="rounded-lg border overflow-hidden bg-muted">
+          <img
+            src={invoice.fileUrl}
+            alt="Invoice"
+            className="w-full object-contain max-h-96"
+            onError={() => queryClient.invalidateQueries({ queryKey: ['invoice', id] })}
+          />
+        </div>
+      )}
 
       {/* Sent-back note */}
       {invoice.status === 'sent_back' && invoice.reviewerNote && (
@@ -266,10 +435,8 @@ export default function InvoiceDetailPage() {
             <Badge className={cn(status.className, 'text-xs')}>
               {status.label}
             </Badge>
-            {invoice.isPriceRevised && (
-              <Badge className="border-transparent bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-400 text-xs">
-                Price Revised
-              </Badge>
+            {invoice.versions.length > 1 && (
+              <span className="text-xs text-muted-foreground">v{invoice.currentVersionNo}</span>
             )}
           </div>
         </div>
@@ -363,30 +530,38 @@ export default function InvoiceDetailPage() {
       {/* Version history */}
       {invoice.versions.length > 0 && (
         <Section title="Version History">
-          <div className="space-y-2">
+          <div className="space-y-4">
             {invoice.versions.map((v) => (
-              <div key={v.id} className="flex items-start gap-3">
-                <div className="mt-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-muted text-xs font-medium shrink-0">
-                  {v.versionNo}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-sm font-medium">
-                      {formatIndianCurrency(v.invoiceAmount)}
-                    </span>
-                    <span className="text-xs text-muted-foreground">
-                      {format(parseISO(v.createdAt), 'd MMM yyyy, HH:mm')}
-                    </span>
-                  </div>
-                  {v.changeReason && (
-                    <p className="text-xs text-muted-foreground mt-0.5">{v.changeReason}</p>
-                  )}
-                </div>
-              </div>
+              <VersionHistoryItem key={v.id} version={v} />
             ))}
           </div>
         </Section>
       )}
+
+      {/* Delete confirmation dialog */}
+      <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Delete Invoice {invoice.invoiceNumber}?</DialogTitle>
+            <DialogDescription>
+              This will also remove all pending GRN entries. This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <DialogClose asChild>
+              <Button variant="outline" size="sm">Cancel</Button>
+            </DialogClose>
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => deleteMutation.mutate()}
+              disabled={deleteMutation.isPending}
+            >
+              {deleteMutation.isPending ? 'Deleting…' : 'Delete Invoice'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

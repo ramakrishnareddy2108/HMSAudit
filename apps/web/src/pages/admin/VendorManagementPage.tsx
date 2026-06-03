@@ -40,7 +40,7 @@ interface Vendor {
   bankAccountName: string | null
   bankBranch: string | null
   isActive: boolean
-  deletedAt: string | null
+  isDeleted: boolean
   createdAt: string
   updatedAt: string
   _count: { invoices: number }
@@ -163,6 +163,7 @@ function VendorDialog({ open, vendor, onClose, onSuccess }: VendorDialogProps) {
       onSuccess()
     },
     onError: (err: unknown) => {
+      if ((err as { _toasted?: boolean })._toasted) return
       const msg =
         (err as { response?: { data?: { error?: string } } }).response?.data?.error ??
         'Failed to create vendor'
@@ -178,6 +179,7 @@ function VendorDialog({ open, vendor, onClose, onSuccess }: VendorDialogProps) {
       onSuccess()
     },
     onError: (err: unknown) => {
+      if ((err as { _toasted?: boolean })._toasted) return
       const msg =
         (err as { response?: { data?: { error?: string } } }).response?.data?.error ??
         'Failed to update vendor'
@@ -519,6 +521,7 @@ export default function VendorManagementPage() {
       api
         .get('/vendors', { params: { search: debouncedSearch || undefined, limit: 100 } })
         .then((r) => r.data),
+    staleTime: 1000 * 60 * 60 * 24 * 7,
   })
 
   // Activate / Deactivate via PUT with isActive toggle
@@ -531,6 +534,7 @@ export default function VendorManagementPage() {
       setToggleTarget(null)
     },
     onError: (err: unknown) => {
+      if ((err as { _toasted?: boolean })._toasted) return
       const msg =
         (err as { response?: { data?: { error?: string } } }).response?.data?.error ??
         'Failed to update vendor'
@@ -558,8 +562,10 @@ export default function VendorManagementPage() {
       if (e.response?.status === 409 && e.response.data?.blockers) {
         setDeleteBlockers(e.response.data.blockers)
       } else {
-        toast.error(e.response?.data?.error ?? 'Failed to delete vendor')
         setDeletingVendor(null)
+        if (!(err as { _toasted?: boolean })._toasted) {
+          toast.error(e.response?.data?.error ?? 'Failed to delete vendor')
+        }
       }
     },
   })

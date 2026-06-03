@@ -501,7 +501,8 @@ function AuditLogTab() {
   const { data: usersData } = useQuery<{ data: User[] }>({
     queryKey: ['users-all'],
     queryFn: () =>
-      api.get('/users', { params: { limit: 500 } }).then((r) => r.data as { data: User[] }),
+      api.get('/users', { params: { limit: 100 } }).then((r) => r.data as { data: User[] }),
+    staleTime: 1000 * 60 * 60 * 24,
     retry: false,
   })
   const users = usersData?.data ?? []

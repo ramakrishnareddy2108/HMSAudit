@@ -19,7 +19,8 @@ export enum ReconciliationStatus {
 export enum MatchStatus {
   matched = 'matched',
   amount_diff = 'amount_diff',
-  app_only = 'app_only',
+  grn_not_found = 'grn_not_found',
+  invoice_only = 'invoice_only',
   excel_only = 'excel_only',
 }
 

@@ -10,7 +10,7 @@ import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { toast } from 'sonner'
-import { Plus, Pencil, XCircle, CheckCircle, AlertTriangle } from 'lucide-react'
+import { Plus, Pencil, XCircle, CheckCircle, Trash2, AlertTriangle } from 'lucide-react'
 import {
   Dialog,
   DialogContent,
@@ -76,6 +76,7 @@ function DeptDialog({ open, dept, onClose, onSuccess }: DeptDialogProps) {
       onSuccess()
     },
     onError: (err: unknown) => {
+      if ((err as { _toasted?: boolean })._toasted) return
       const msg =
         (err as { response?: { data?: { message?: string } } }).response?.data?.message ??
         'Failed to create department'
@@ -91,6 +92,7 @@ function DeptDialog({ open, dept, onClose, onSuccess }: DeptDialogProps) {
       onSuccess()
     },
     onError: (err: unknown) => {
+      if ((err as { _toasted?: boolean })._toasted) return
       const msg =
         (err as { response?: { data?: { message?: string } } }).response?.data?.message ??
         'Failed to update department'
@@ -134,6 +136,70 @@ function DeptDialog({ open, dept, onClose, onSuccess }: DeptDialogProps) {
             </Button>
           </DialogFooter>
         </form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ── Delete Confirm ────────────────────────────────────────────────────────────
+
+interface DeptDeleteBlockers {
+  activeInvoices: number
+}
+
+interface ConfirmDeleteProps {
+  dept: Department | null
+  blockers: DeptDeleteBlockers | null
+  onClose: () => void
+  onConfirm: () => void
+  isPending: boolean
+}
+
+function ConfirmDelete({ dept, blockers, onClose, onConfirm, isPending }: ConfirmDeleteProps) {
+  const isBlocked = blockers !== null
+
+  return (
+    <Dialog open={Boolean(dept)} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-sm">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Trash2 size={18} className="text-destructive" />
+            Delete Department?
+          </DialogTitle>
+        </DialogHeader>
+
+        {isBlocked ? (
+          <div className="py-2 space-y-3">
+            <p className="text-sm font-medium text-destructive">Cannot delete — blocking items exist:</p>
+            <ul className="text-sm space-y-1.5 text-muted-foreground">
+              <li className="flex items-center gap-2">
+                <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
+                {blockers!.activeInvoices} active invoice{blockers!.activeInvoices !== 1 ? 's' : ''} (draft / in-review / approved)
+              </li>
+            </ul>
+            <p className="text-xs text-muted-foreground">Resolve or finalise the items above, then try again.</p>
+          </div>
+        ) : (
+          <div className="py-2 text-sm text-muted-foreground space-y-2">
+            <p>
+              <strong className="text-foreground">{dept?.name}</strong> will be permanently removed. All user assignments will also be removed.
+            </p>
+            <p className="text-xs text-destructive">This action cannot be undone.</p>
+          </div>
+        )}
+
+        <DialogFooter>
+          {isBlocked ? (
+            <Button onClick={onClose}>Close</Button>
+          ) : (
+            <>
+              <Button variant="outline" onClick={onClose}>Cancel</Button>
+              <Button variant="destructive" onClick={onConfirm} disabled={isPending}>
+                {isPending ? 'Deleting…' : 'Delete'}
+              </Button>
+            </>
+          )}
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   )
@@ -206,6 +272,8 @@ export default function DepartmentManagementPage() {
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editingDept, setEditingDept] = useState<Department | null>(null)
   const [toggleTarget, setToggleTarget] = useState<Department | null>(null)
+  const [deletingDept, setDeletingDept] = useState<Department | null>(null)
+  const [deleteBlockers, setDeleteBlockers] = useState<DeptDeleteBlockers | null>(null)
 
   const {
     data,
@@ -214,6 +282,7 @@ export default function DepartmentManagementPage() {
   } = useQuery<Department[]>({
     queryKey: ['departments'],
     queryFn: () => api.get('/departments').then((r) => r.data),
+    staleTime: 1000 * 60 * 60 * 24 * 7,
   })
 
   const departments: Department[] = [...(data ?? [])].sort((a, b) =>
@@ -229,10 +298,35 @@ export default function DepartmentManagementPage() {
       setToggleTarget(null)
     },
     onError: (err: unknown) => {
+      if ((err as { _toasted?: boolean })._toasted) return
       const msg =
         (err as { response?: { data?: { message?: string } } }).response?.data?.message ??
         'Failed to update department'
       toast.error(msg)
+    },
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => api.delete(`/departments/${id}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['departments'] })
+      toast.success('Department deleted')
+      setDeletingDept(null)
+      setDeleteBlockers(null)
+    },
+    onError: (err: unknown) => {
+      type ErrShape = {
+        response?: { status?: number; data?: { message?: string; blockers?: DeptDeleteBlockers } }
+      }
+      const e = err as ErrShape
+      if (e.response?.status === 409 && e.response.data?.blockers) {
+        setDeleteBlockers(e.response.data.blockers)
+      } else {
+        setDeletingDept(null)
+        if (!(err as { _toasted?: boolean })._toasted) {
+          toast.error(e.response?.data?.message ?? 'Failed to delete department')
+        }
+      }
     },
   })
 
@@ -249,6 +343,11 @@ export default function DepartmentManagementPage() {
   function closeDialog() {
     setDialogOpen(false)
     setEditingDept(null)
+  }
+
+  function closeDelete() {
+    setDeletingDept(null)
+    setDeleteBlockers(null)
   }
 
   const columns: ColumnDef<Department>[] = [
@@ -322,6 +421,15 @@ export default function DepartmentManagementPage() {
                 <CheckCircle size={14} />
               </Button>
             )}
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 hover:text-destructive"
+              onClick={() => { setDeleteBlockers(null); setDeletingDept(d) }}
+              title="Delete"
+            >
+              <Trash2 size={14} />
+            </Button>
           </div>
         )
       },
@@ -421,6 +529,14 @@ export default function DepartmentManagementPage() {
           toggleMutation.mutate({ id: toggleTarget.id, isActive: !toggleTarget.isActive })
         }
         isPending={toggleMutation.isPending}
+      />
+
+      <ConfirmDelete
+        dept={deletingDept}
+        blockers={deleteBlockers}
+        onClose={closeDelete}
+        onConfirm={() => deletingDept && deleteMutation.mutate(deletingDept.id)}
+        isPending={deleteMutation.isPending}
       />
     </div>
   )

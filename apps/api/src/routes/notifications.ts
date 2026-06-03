@@ -26,7 +26,10 @@ const markReadBodySchema = z
 export default async function notificationRoutes(fastify: FastifyInstance) {
   fastify.get(
     '/unread-count',
-    { preHandler: [authenticate] },
+    {
+      schema: { tags: ['Notifications'], summary: 'Get unread notification count' },
+      preHandler: [authenticate],
+    },
     async (request: FastifyRequest, _reply: FastifyReply) => {
       const count = await fastify.prisma.notification.count({
         where: { userId: uid(request), isRead: false },
@@ -37,7 +40,10 @@ export default async function notificationRoutes(fastify: FastifyInstance) {
 
   fastify.get(
     '/',
-    { preHandler: [authenticate] },
+    {
+      schema: { tags: ['Notifications'], summary: 'List notifications with pagination' },
+      preHandler: [authenticate],
+    },
     async (request: FastifyRequest, _reply: FastifyReply) => {
       const { unreadOnly, page, limit } = listQuerySchema.parse(request.query)
       const userId = uid(request)
@@ -82,7 +88,10 @@ export default async function notificationRoutes(fastify: FastifyInstance) {
 
   fastify.post(
     '/mark-read',
-    { preHandler: [authenticate] },
+    {
+      schema: { tags: ['Notifications'], summary: 'Mark notifications as read' },
+      preHandler: [authenticate],
+    },
     async (request: FastifyRequest, _reply: FastifyReply) => {
       const body = markReadBodySchema.parse(request.body)
       const userId = uid(request)

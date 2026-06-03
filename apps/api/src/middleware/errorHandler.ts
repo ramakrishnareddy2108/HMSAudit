@@ -1,46 +1,76 @@
-import { FastifyError, FastifyReply, FastifyRequest } from 'fastify'
+import type { FastifyReply, FastifyRequest } from 'fastify'
 import { ZodError } from 'zod'
 import { Prisma } from '@prisma/client'
-import { config } from '../config'
 
 export function errorHandler(
-  error: FastifyError,
+  error: Error,
   request: FastifyRequest,
   reply: FastifyReply,
 ): void {
   request.log.error(error)
 
   if (error instanceof ZodError) {
-    reply.status(400).send({
-      error: 'Validation error',
-      details: error.errors.map((e) => ({
-        field: e.path.join('.'),
-        message: e.message,
-      })),
-    })
+    const message = error.errors.map((e) => `${e.path.join('.')}: ${e.message}`).join('; ')
+    reply.status(400).send({ success: false, error: 'Validation Error', message, statusCode: 400 })
     return
   }
 
   if (error instanceof Prisma.PrismaClientKnownRequestError) {
-    if (error.code === 'P2002') {
-      const fields = (error.meta?.target as string[] | undefined)?.join(', ') ?? 'field'
-      reply.status(409).send({ error: `Duplicate value for ${fields}` })
+    const mapped: Record<string, { code: number; msg: string }> = {
+      P2002: { code: 409, msg: 'Record already exists' },
+      P2025: { code: 404, msg: 'Record not found' },
+      P2003: { code: 400, msg: 'Invalid reference' },
+    }
+    const entry = mapped[error.code]
+    if (entry) {
+      reply.status(entry.code).send({
+        success: false,
+        error: entry.msg,
+        message: entry.msg,
+        statusCode: entry.code,
+      })
       return
     }
-    if (error.code === 'P2025') {
-      reply.status(404).send({ error: 'Record not found' })
-      return
-    }
-  }
-
-  const statusCode = error.statusCode ?? 500
-
-  if (config.nodeEnv === 'development') {
-    reply.status(statusCode).send({ error: error.message, stack: error.stack })
+    reply.status(400).send({
+      success: false,
+      error: 'Database Error',
+      message: 'Missing required data. Please try again.',
+      statusCode: 400,
+    })
     return
   }
 
-  reply
-    .status(statusCode >= 500 ? 500 : statusCode)
-    .send({ error: statusCode >= 500 ? 'Internal server error' : error.message })
+  if (error instanceof Prisma.PrismaClientValidationError) {
+    reply.status(400).send({
+      success: false,
+      error: 'Validation Error',
+      message: 'Missing required data. Please try again.',
+      statusCode: 400,
+    })
+    return
+  }
+
+  if (
+    error.name === 'JsonWebTokenError' ||
+    error.name === 'TokenExpiredError' ||
+    error.name === 'NotBeforeError'
+  ) {
+    reply.status(401).send({
+      success: false,
+      error: 'Authentication Error',
+      message: 'Session expired. Please login again.',
+      statusCode: 401,
+    })
+    return
+  }
+
+  const statusCode = (error as { statusCode?: number }).statusCode ?? 500
+  const isServer = statusCode >= 500
+
+  reply.status(isServer ? 500 : statusCode).send({
+    success: false,
+    error: isServer ? 'Internal Server Error' : error.message,
+    message: isServer ? 'Something went wrong. Please try again.' : error.message,
+    statusCode: isServer ? 500 : statusCode,
+  })
 }

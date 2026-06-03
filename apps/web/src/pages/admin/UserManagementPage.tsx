@@ -10,7 +10,7 @@ import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { toast } from 'sonner'
-import { Plus, Pencil, UserX, UserCheck, Search, AlertTriangle } from 'lucide-react'
+import { Plus, Pencil, UserX, UserCheck, Search, AlertTriangle, KeyRound } from 'lucide-react'
 import {
   Dialog,
   DialogContent,
@@ -75,10 +75,11 @@ function RoleBadge({ role }: { role: UserRole }) {
 
 // ── Form schemas ──────────────────────────────────────────────────────────────
 
-const inviteSchema = z.object({
+const createSchema = z.object({
   name: z.string().min(1, 'Name is required'),
   email: z.string().email('Valid email required'),
-  role: z.enum(['role_1', 'role_2', 'admin'] as const),
+  password: z.string().min(8, 'Password must be at least 8 characters'),
+  role: z.enum(['role_1', 'role_2'] as const),
   departmentIds: z.array(z.string()).default([]),
 })
 
@@ -88,23 +89,30 @@ const editSchema = z.object({
   departmentIds: z.array(z.string()).default([]),
 })
 
-type InviteFormValues = z.infer<typeof inviteSchema>
+const resetPasswordSchema = z
+  .object({
+    newPassword: z.string().min(8, 'Password must be at least 8 characters'),
+    confirmPassword: z.string().min(8, 'Password must be at least 8 characters'),
+  })
+  .refine((d) => d.newPassword === d.confirmPassword, {
+    message: 'Passwords do not match',
+    path: ['confirmPassword'],
+  })
+
+type CreateFormValues = z.infer<typeof createSchema>
 type EditFormValues = z.infer<typeof editSchema>
+type ResetPasswordFormValues = z.infer<typeof resetPasswordSchema>
 
 // ── Role Radio ────────────────────────────────────────────────────────────────
 
 interface RoleRadioProps {
-  value: UserRole
-  onChange: (v: UserRole) => void
+  value: string
+  onChange: (v: 'role_1' | 'role_2' | 'admin') => void
+  options: { val: 'role_1' | 'role_2' | 'admin'; label: string }[]
   disabled?: boolean
 }
 
-function RoleRadio({ value, onChange, disabled }: RoleRadioProps) {
-  const options: { val: UserRole; label: string }[] = [
-    { val: 'role_1', label: 'Staff' },
-    { val: 'role_2', label: 'Reviewer' },
-    { val: 'admin', label: 'Admin' },
-  ]
+function RoleRadio({ value, onChange, options, disabled }: RoleRadioProps) {
   return (
     <div className="flex gap-4">
       {options.map(({ val, label }) => (
@@ -165,16 +173,17 @@ function DeptCheckboxes({ departments, selected, onChange }: DeptCheckboxesProps
   )
 }
 
-// ── Invite Dialog ─────────────────────────────────────────────────────────────
+// ── Create User Dialog ────────────────────────────────────────────────────────
 
-interface InviteDialogProps {
+interface CreateDialogProps {
   open: boolean
   departments: Department[]
   onClose: () => void
 }
 
-function InviteDialog({ open, departments, onClose }: InviteDialogProps) {
+function CreateDialog({ open, departments, onClose }: CreateDialogProps) {
   const queryClient = useQueryClient()
+  const [showPassword, setShowPassword] = useState(false)
 
   const {
     register,
@@ -183,9 +192,9 @@ function InviteDialog({ open, departments, onClose }: InviteDialogProps) {
     setValue,
     reset,
     formState: { errors },
-  } = useForm<InviteFormValues>({
-    resolver: zodResolver(inviteSchema),
-    defaultValues: { name: '', email: '', role: 'role_1', departmentIds: [] },
+  } = useForm<CreateFormValues>({
+    resolver: zodResolver(createSchema),
+    defaultValues: { name: '', email: '', password: '', role: 'role_1', departmentIds: [] },
   })
 
   const role = watch('role')
@@ -193,48 +202,51 @@ function InviteDialog({ open, departments, onClose }: InviteDialogProps) {
 
   useEffect(() => {
     if (!open) return
-    reset({ name: '', email: '', role: 'role_1', departmentIds: [] })
+    reset({ name: '', email: '', password: '', role: 'role_1', departmentIds: [] })
+    setShowPassword(false)
   }, [open, reset])
 
   const mutation = useMutation({
-    mutationFn: (v: InviteFormValues) =>
-      api.post('/users/invite', {
+    mutationFn: (v: CreateFormValues) =>
+      api.post('/users/create', {
         name: v.name,
         email: v.email,
+        password: v.password,
         role: v.role,
         ...(v.role === 'role_1' && { departmentIds: v.departmentIds }),
       }),
-    onSuccess: (_, vars) => {
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['users'] })
-      toast.success(`Invite sent to ${vars.email}`)
+      toast.success('User created successfully')
       onClose()
     },
     onError: (err: unknown) => {
       const msg =
         (err as { response?: { data?: { message?: string } } }).response?.data?.message ??
-        'Failed to send invite'
+        'Failed to create user'
       toast.error(msg)
     },
   })
 
-  function onSubmit(v: InviteFormValues) {
-    mutation.mutate(v)
-  }
+  const staffReviewerOptions: { val: 'role_1' | 'role_2' | 'admin'; label: string }[] = [
+    { val: 'role_1', label: 'Staff' },
+    { val: 'role_2', label: 'Reviewer' },
+  ]
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Invite User</DialogTitle>
+          <DialogTitle>Create User</DialogTitle>
         </DialogHeader>
 
-        <form onSubmit={handleSubmit(onSubmit)} className="space-y-4 py-2">
+        <form onSubmit={handleSubmit((v) => mutation.mutate(v))} className="space-y-4 py-2">
           <div className="space-y-1.5">
-            <Label htmlFor="invite-name">
+            <Label htmlFor="create-name">
               Name <span className="text-destructive">*</span>
             </Label>
             <Input
-              id="invite-name"
+              id="create-name"
               {...register('name')}
               placeholder="Full name"
               className={cn(errors.name && 'border-destructive')}
@@ -243,11 +255,11 @@ function InviteDialog({ open, departments, onClose }: InviteDialogProps) {
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="invite-email">
+            <Label htmlFor="create-email">
               Email <span className="text-destructive">*</span>
             </Label>
             <Input
-              id="invite-email"
+              id="create-email"
               {...register('email')}
               type="email"
               placeholder="user@hospital.com"
@@ -257,11 +269,37 @@ function InviteDialog({ open, departments, onClose }: InviteDialogProps) {
           </div>
 
           <div className="space-y-1.5">
+            <Label htmlFor="create-password">
+              Password <span className="text-destructive">*</span>
+            </Label>
+            <div className="relative">
+              <Input
+                id="create-password"
+                {...register('password')}
+                type={showPassword ? 'text' : 'password'}
+                placeholder="Min. 8 characters"
+                className={cn('pr-16', errors.password && 'border-destructive')}
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword((v) => !v)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground hover:text-foreground"
+              >
+                {showPassword ? 'Hide' : 'Show'}
+              </button>
+            </div>
+            {errors.password && (
+              <p className="text-xs text-destructive">{errors.password.message}</p>
+            )}
+          </div>
+
+          <div className="space-y-1.5">
             <Label>Role</Label>
             <RoleRadio
               value={role}
+              options={staffReviewerOptions}
               onChange={(v) => {
-                setValue('role', v)
+                setValue('role', v as 'role_1' | 'role_2')
                 if (v !== 'role_1') setValue('departmentIds', [])
               }}
             />
@@ -283,7 +321,7 @@ function InviteDialog({ open, departments, onClose }: InviteDialogProps) {
               Cancel
             </Button>
             <Button type="submit" disabled={mutation.isPending}>
-              {mutation.isPending ? 'Sending…' : 'Send Invite'}
+              {mutation.isPending ? 'Creating…' : 'Create User'}
             </Button>
           </DialogFooter>
         </form>
@@ -350,9 +388,11 @@ function EditDialog({ open, user, departments, currentUserId, onClose }: EditDia
     },
   })
 
-  function onSubmit(v: EditFormValues) {
-    mutation.mutate(v)
-  }
+  const allRoleOptions: { val: 'role_1' | 'role_2' | 'admin'; label: string }[] = [
+    { val: 'role_1', label: 'Staff' },
+    { val: 'role_2', label: 'Reviewer' },
+    { val: 'admin', label: 'Admin' },
+  ]
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
@@ -361,7 +401,7 @@ function EditDialog({ open, user, departments, currentUserId, onClose }: EditDia
           <DialogTitle>Edit User</DialogTitle>
         </DialogHeader>
 
-        <form onSubmit={handleSubmit(onSubmit)} className="space-y-4 py-2">
+        <form onSubmit={handleSubmit((v) => mutation.mutate(v))} className="space-y-4 py-2">
           <div className="space-y-1.5">
             <Label htmlFor="edit-name">
               Name <span className="text-destructive">*</span>
@@ -376,9 +416,15 @@ function EditDialog({ open, user, departments, currentUserId, onClose }: EditDia
           </div>
 
           <div className="space-y-1.5">
-            <Label>Role {isSelf && <span className="text-xs text-muted-foreground">(cannot change your own role)</span>}</Label>
+            <Label>
+              Role{' '}
+              {isSelf && (
+                <span className="text-xs text-muted-foreground">(cannot change your own role)</span>
+              )}
+            </Label>
             <RoleRadio
               value={role}
+              options={allRoleOptions}
               onChange={(v) => {
                 setValue('role', v)
                 if (v !== 'role_1') setValue('departmentIds', [])
@@ -412,6 +458,121 @@ function EditDialog({ open, user, departments, currentUserId, onClose }: EditDia
   )
 }
 
+// ── Reset Password Dialog ─────────────────────────────────────────────────────
+
+interface ResetPasswordDialogProps {
+  user: UserRecord | null
+  onClose: () => void
+}
+
+function ResetPasswordDialog({ user, onClose }: ResetPasswordDialogProps) {
+  const [showNew, setShowNew] = useState(false)
+  const [showConfirm, setShowConfirm] = useState(false)
+
+  const {
+    register,
+    handleSubmit,
+    reset,
+    formState: { errors },
+  } = useForm<ResetPasswordFormValues>({
+    resolver: zodResolver(resetPasswordSchema),
+    defaultValues: { newPassword: '', confirmPassword: '' },
+  })
+
+  useEffect(() => {
+    if (!user) return
+    reset({ newPassword: '', confirmPassword: '' })
+    setShowNew(false)
+    setShowConfirm(false)
+  }, [user, reset])
+
+  const mutation = useMutation({
+    mutationFn: (v: ResetPasswordFormValues) =>
+      api.post(`/users/${user!.id}/reset-password`, { newPassword: v.newPassword }),
+    onSuccess: () => {
+      toast.success('Password reset successfully')
+      onClose()
+    },
+    onError: (err: unknown) => {
+      const msg =
+        (err as { response?: { data?: { message?: string } } }).response?.data?.message ??
+        'Failed to reset password'
+      toast.error(msg)
+    },
+  })
+
+  return (
+    <Dialog open={Boolean(user)} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-sm">
+        <DialogHeader>
+          <DialogTitle>Reset Password — {user?.name}</DialogTitle>
+        </DialogHeader>
+
+        <form onSubmit={handleSubmit((v) => mutation.mutate(v))} className="space-y-4 py-2">
+          <div className="space-y-1.5">
+            <Label htmlFor="new-password">
+              New Password <span className="text-destructive">*</span>
+            </Label>
+            <div className="relative">
+              <Input
+                id="new-password"
+                {...register('newPassword')}
+                type={showNew ? 'text' : 'password'}
+                placeholder="Min. 8 characters"
+                className={cn('pr-16', errors.newPassword && 'border-destructive')}
+              />
+              <button
+                type="button"
+                onClick={() => setShowNew((v) => !v)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground hover:text-foreground"
+              >
+                {showNew ? 'Hide' : 'Show'}
+              </button>
+            </div>
+            {errors.newPassword && (
+              <p className="text-xs text-destructive">{errors.newPassword.message}</p>
+            )}
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="confirm-password">
+              Confirm Password <span className="text-destructive">*</span>
+            </Label>
+            <div className="relative">
+              <Input
+                id="confirm-password"
+                {...register('confirmPassword')}
+                type={showConfirm ? 'text' : 'password'}
+                placeholder="Re-enter password"
+                className={cn('pr-16', errors.confirmPassword && 'border-destructive')}
+              />
+              <button
+                type="button"
+                onClick={() => setShowConfirm((v) => !v)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground hover:text-foreground"
+              >
+                {showConfirm ? 'Hide' : 'Show'}
+              </button>
+            </div>
+            {errors.confirmPassword && (
+              <p className="text-xs text-destructive">{errors.confirmPassword.message}</p>
+            )}
+          </div>
+
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={mutation.isPending}>
+              {mutation.isPending ? 'Resetting…' : 'Reset Password'}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
 // ── Deactivate Confirm ────────────────────────────────────────────────────────
 
 interface DeactivateConfirmProps {
@@ -433,7 +594,8 @@ function DeactivateConfirm({ user, onClose, onConfirm, isPending }: DeactivateCo
         </DialogHeader>
         <div className="py-2 text-sm text-muted-foreground space-y-2">
           <p>
-            <strong className="text-foreground">{user?.name}</strong> will lose access to the system.
+            <strong className="text-foreground">{user?.name}</strong> will lose access to the
+            system.
           </p>
           <p className="text-xs">You can reactivate this account at any time.</p>
         </div>
@@ -458,8 +620,9 @@ export default function UserManagementPage() {
 
   const [search, setSearch] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
-  const [inviteOpen, setInviteOpen] = useState(false)
+  const [createOpen, setCreateOpen] = useState(false)
   const [editingUser, setEditingUser] = useState<UserRecord | null>(null)
+  const [resettingUser, setResettingUser] = useState<UserRecord | null>(null)
   const [deactivatingUser, setDeactivatingUser] = useState<UserRecord | null>(null)
 
   useEffect(() => {
@@ -473,11 +636,13 @@ export default function UserManagementPage() {
       api
         .get('/users', { params: { search: debouncedSearch || undefined, limit: 100 } })
         .then((r) => r.data),
+    staleTime: 1000 * 60 * 60 * 24 * 7,
   })
 
   const { data: departments = [] } = useQuery<Department[]>({
     queryKey: ['departments-active'],
     queryFn: () => api.get('/departments', { params: { isActive: true } }).then((r) => r.data),
+    enabled: createOpen || Boolean(editingUser),
   })
 
   const deactivateMutation = useMutation({
@@ -555,7 +720,9 @@ export default function UserManagementPage() {
       cell: ({ getValue }) => {
         const active = getValue() as boolean
         return (
-          <Badge variant={active ? 'default' : 'secondary'}>{active ? 'Active' : 'Inactive'}</Badge>
+          <Badge variant={active ? 'default' : 'secondary'}>
+            {active ? 'Active' : 'Inactive'}
+          </Badge>
         )
       },
     },
@@ -575,6 +742,16 @@ export default function UserManagementPage() {
               title="Edit"
             >
               <Pencil size={14} />
+            </Button>
+
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8"
+              onClick={() => setResettingUser(u)}
+              title="Reset Password"
+            >
+              <KeyRound size={14} />
             </Button>
 
             {u.isActive ? (
@@ -616,9 +793,9 @@ export default function UserManagementPage() {
     <div>
       <div className="flex items-center justify-between mb-6">
         <h1 className="text-2xl font-bold tracking-tight">User Management</h1>
-        <Button onClick={() => setInviteOpen(true)}>
+        <Button onClick={() => setCreateOpen(true)}>
           <Plus size={16} className="mr-2" />
-          Invite User
+          Create User
         </Button>
       </div>
 
@@ -691,17 +868,17 @@ export default function UserManagementPage() {
         </table>
       </div>
 
-      {data && (
+      {data?.pagination && (
         <p className="mt-2 text-xs text-muted-foreground">
           {data.pagination.total} user{data.pagination.total !== 1 ? 's' : ''} total
           {debouncedSearch && ` · filtered by "${debouncedSearch}"`}
         </p>
       )}
 
-      <InviteDialog
-        open={inviteOpen}
+      <CreateDialog
+        open={createOpen}
         departments={departments}
-        onClose={() => setInviteOpen(false)}
+        onClose={() => setCreateOpen(false)}
       />
 
       <EditDialog
@@ -711,6 +888,8 @@ export default function UserManagementPage() {
         currentUserId={currentUser?.id ?? ''}
         onClose={() => setEditingUser(null)}
       />
+
+      <ResetPasswordDialog user={resettingUser} onClose={() => setResettingUser(null)} />
 
       <DeactivateConfirm
         user={deactivatingUser}

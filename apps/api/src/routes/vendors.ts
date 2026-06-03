@@ -2,6 +2,8 @@ import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { Prisma, type User, InvoiceStatus } from '@prisma/client'
 import { z } from 'zod'
 import { authenticate, requireRole } from '../middleware/auth'
+import { cacheService } from '../services/cacheService'
+import { AUDIT_LOG_ENABLED } from '../constants'
 
 function uid(request: FastifyRequest): string {
   return (request.user as User).id
@@ -43,9 +45,16 @@ const updateVendorBodySchema = createVendorBodySchema.partial().extend({
 
 const listQuerySchema = z.object({
   page: z.coerce.number().int().positive().default(1),
-  limit: z.coerce.number().int().positive().max(100).default(50),
+  limit: z.coerce.number().int().positive().max(500).default(50),
   search: z.string().optional(),
   isActive: z.coerce.boolean().optional(),
+  withLedgerSummary: z.coerce.boolean().optional(),
+})
+
+const openingBalanceBodySchema = z.object({
+  asOfDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Expected YYYY-MM-DD'),
+  amount: z.coerce.number(),
+  notes: z.string().optional(),
 })
 
 type CreateBody = z.infer<typeof createVendorBodySchema>
@@ -60,7 +69,6 @@ function bankGroupError(body: Partial<CreateBody>): string | null {
   return null
 }
 
-// Non-final statuses that block vendor deletion
 const BLOCKING_INVOICE_STATUSES: InvoiceStatus[] = [
   InvoiceStatus.draft,
   InvoiceStatus.pending_review,
@@ -70,15 +78,31 @@ const BLOCKING_INVOICE_STATUSES: InvoiceStatus[] = [
 ]
 
 export default async function vendorsRoutes(fastify: FastifyInstance) {
-  // GET /vendors — paginated list, all roles
   fastify.get(
     '/',
-    { preHandler: [authenticate] },
-    async (request: FastifyRequest, _reply: FastifyReply) => {
-      const { page, limit, search, isActive } = listQuerySchema.parse(request.query)
+    {
+      schema: { tags: ['Vendors'], summary: 'List vendors with pagination' },
+      preHandler: [authenticate],
+    },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const { page, limit, search, isActive, withLedgerSummary } = listQuerySchema.parse(request.query)
+      const hospitalId = request.user.activeHospitalId ?? 'global'
+
+      const cacheKey = withLedgerSummary
+        ? null
+        : `vendors_${hospitalId}_p${page}_l${limit}_s${search ?? ''}_a${String(isActive ?? '')}`
+
+      if (cacheKey) {
+        const cached = cacheService.get(cacheKey)
+        if (cached) {
+          reply.header('Cache-Control', 'private, max-age=3600')
+          return cached
+        }
+      }
+
       const skip = (page - 1) * limit
 
-      const where: Prisma.VendorWhereInput = { deletedAt: null }
+      const where: Prisma.VendorWhereInput = { isDeleted: false }
       if (search) {
         where.OR = [
           { name: { contains: search, mode: 'insensitive' } },
@@ -102,22 +126,81 @@ export default async function vendorsRoutes(fastify: FastifyInstance) {
         request.server.prisma.vendor.count({ where }),
       ])
 
-      return {
-        data: vendors,
-        pagination: {
-          page,
-          limit,
-          total,
-          totalPages: Math.ceil(total / limit),
-        },
+      if (!withLedgerSummary) {
+        const result = {
+          data: vendors,
+          pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+        }
+        cacheService.set(cacheKey!, result)
+        reply.header('Cache-Control', 'private, max-age=3600')
+        return result
       }
+
+      const vendorIds = vendors.map((v) => v.id)
+      const pagination = { page, limit, total, totalPages: Math.ceil(total / limit) }
+
+      if (vendorIds.length === 0) return { data: [], pagination }
+
+      const [invoiceGrns, allPayments, allInvoiceDates] = await Promise.all([
+        request.server.prisma.invoice.findMany({
+          where: { vendorId: { in: vendorIds } },
+          select: {
+            vendorId: true,
+            grnEntries: {
+              where: { status: 'reconciled', isDeleted: false },
+              select: { grnAmount: true },
+            },
+          },
+        }),
+        request.server.prisma.payment.findMany({
+          where: { vendorId: { in: vendorIds } },
+          orderBy: { paymentDate: 'desc' },
+          select: { vendorId: true, paymentDate: true },
+        }),
+        request.server.prisma.invoice.findMany({
+          where: { vendorId: { in: vendorIds }, invoiceDate: { not: null } },
+          orderBy: { invoiceDate: 'desc' },
+          select: { vendorId: true, invoiceDate: true },
+        }),
+      ])
+
+      const outstandingMap = new Map<string, number>()
+      for (const inv of invoiceGrns) {
+        const current = outstandingMap.get(inv.vendorId) ?? 0
+        outstandingMap.set(inv.vendorId, current + inv.grnEntries.reduce((s, g) => s + Number(g.grnAmount), 0))
+      }
+
+      const lastPaymentMap = new Map<string, Date>()
+      for (const p of allPayments) {
+        if (!lastPaymentMap.has(p.vendorId)) lastPaymentMap.set(p.vendorId, p.paymentDate)
+      }
+
+      const lastInvoiceDateMap = new Map<string, Date>()
+      for (const inv of allInvoiceDates) {
+        if (!lastInvoiceDateMap.has(inv.vendorId) && inv.invoiceDate) {
+          lastInvoiceDateMap.set(inv.vendorId, inv.invoiceDate)
+        }
+      }
+
+      const augmented = vendors
+        .map((v) => ({
+          ...v,
+          outstandingAmount: outstandingMap.get(v.id) ?? 0,
+          lastPaymentDate: lastPaymentMap.get(v.id) ?? null,
+          lastInvoiceDate: lastInvoiceDateMap.get(v.id) ?? null,
+        }))
+        .sort((a, b) => b.outstandingAmount - a.outstandingAmount)
+
+      return { data: augmented, pagination }
     },
   )
 
-  // POST /vendors — admin only
   fastify.post(
     '/',
-    { preHandler: [authenticate, requireRole('admin')] },
+    {
+      schema: { tags: ['Vendors'], summary: 'Create a new vendor' },
+      preHandler: [authenticate, requireRole('admin')],
+    },
     async (request: FastifyRequest, reply: FastifyReply) => {
       const body = createVendorBodySchema.parse(request.body)
 
@@ -125,33 +208,40 @@ export default async function vendorsRoutes(fastify: FastifyInstance) {
       if (bankErr) return reply.status(400).send({ error: bankErr })
 
       const existing = await request.server.prisma.vendor.findFirst({
-        where: { name: { equals: body.name, mode: 'insensitive' }, deletedAt: null },
+        where: { name: { equals: body.name, mode: 'insensitive' }, isDeleted: false },
       })
       if (existing) {
         return reply.status(409).send({ error: 'Vendor already exists' })
       }
 
-      const vendor = await request.server.prisma.vendor.create({ data: body })
-
-      await request.server.prisma.auditLog.create({
-        data: {
-          userId: uid(request),
-          action: 'CREATE',
-          entityType: 'Vendor',
-          entityId: vendor.id,
-          newValue: body as unknown as Prisma.InputJsonValue,
-          ipAddress: request.ip,
-        },
+      const vendor = await request.server.prisma.vendor.create({
+        data: body as unknown as Prisma.VendorUncheckedCreateInput,
       })
 
+      if (AUDIT_LOG_ENABLED) {
+        await request.server.prisma.auditLog.create({
+          data: {
+            userId: uid(request),
+            action: 'CREATE',
+            entityType: 'Vendor',
+            entityId: vendor.id,
+            newValue: body as unknown as Prisma.InputJsonValue,
+            ipAddress: request.ip,
+          },
+        })
+      }
+
+      cacheService.deleteByPrefix(`vendors_${request.user.activeHospitalId ?? 'global'}`)
       return reply.status(201).send(vendor)
     },
   )
 
-  // GET /vendors/:id — all roles, includes invoice count
   fastify.get(
     '/:id',
-    { preHandler: [authenticate] },
+    {
+      schema: { tags: ['Vendors'], summary: 'Get vendor by ID' },
+      preHandler: [authenticate],
+    },
     async (request: FastifyRequest, reply: FastifyReply) => {
       const { id } = vendorIdParamsSchema.parse(request.params)
 
@@ -160,7 +250,7 @@ export default async function vendorsRoutes(fastify: FastifyInstance) {
         include: { _count: { select: { invoices: true } } },
       })
 
-      if (!vendor || vendor.deletedAt) {
+      if (!vendor || vendor.isDeleted) {
         return reply.status(404).send({ error: 'Vendor not found' })
       }
 
@@ -168,16 +258,18 @@ export default async function vendorsRoutes(fastify: FastifyInstance) {
     },
   )
 
-  // PUT /vendors/:id — update fields + isActive toggle (both directions)
   fastify.put(
     '/:id',
-    { preHandler: [authenticate, requireRole('admin')] },
+    {
+      schema: { tags: ['Vendors'], summary: 'Update vendor details' },
+      preHandler: [authenticate, requireRole('admin')],
+    },
     async (request: FastifyRequest, reply: FastifyReply) => {
       const { id } = vendorIdParamsSchema.parse(request.params)
       const body = updateVendorBodySchema.parse(request.body) as UpdateBody
 
       const existing = await request.server.prisma.vendor.findUnique({ where: { id } })
-      if (!existing || existing.deletedAt) {
+      if (!existing || existing.isDeleted) {
         return reply.status(404).send({ error: 'Vendor not found' })
       }
 
@@ -189,7 +281,7 @@ export default async function vendorsRoutes(fastify: FastifyInstance) {
           where: {
             name: { equals: body.name, mode: 'insensitive' },
             id: { not: id },
-            deletedAt: null,
+            isDeleted: false,
           },
         })
         if (duplicate) {
@@ -206,51 +298,52 @@ export default async function vendorsRoutes(fastify: FastifyInstance) {
       const isDeactivating = body.isActive === false && existing.isActive
       const action = isActivating ? 'ACTIVATE' : isDeactivating ? 'DEACTIVATE' : 'UPDATE'
 
-      await request.server.prisma.auditLog.create({
-        data: {
-          userId: uid(request),
-          action,
-          entityType: 'Vendor',
-          entityId: id,
-          oldValue: {
-            name: existing.name,
-            contactName: existing.contactName,
-            phone: existing.phone,
-            email: existing.email,
-            gstNumber: existing.gstNumber,
-            isActive: existing.isActive,
-          } as unknown as Prisma.InputJsonValue,
-          newValue: body as unknown as Prisma.InputJsonValue,
-          ipAddress: request.ip,
-        },
-      })
+      if (AUDIT_LOG_ENABLED) {
+        await request.server.prisma.auditLog.create({
+          data: {
+            userId: uid(request),
+            action,
+            entityType: 'Vendor',
+            entityId: id,
+            oldValue: {
+              name: existing.name,
+              contactName: existing.contactName,
+              phone: existing.phone,
+              email: existing.email,
+              gstNumber: existing.gstNumber,
+              isActive: existing.isActive,
+            } as unknown as Prisma.InputJsonValue,
+            newValue: body as unknown as Prisma.InputJsonValue,
+            ipAddress: request.ip,
+          },
+        })
+      }
 
+      cacheService.deleteByPrefix(`vendors_${request.user.activeHospitalId ?? 'global'}`)
       return updated
     },
   )
 
-  // DELETE /vendors/:id — blocking check then soft delete (sets deletedAt)
   fastify.delete(
     '/:id',
-    { preHandler: [authenticate, requireRole('admin')] },
+    {
+      schema: { tags: ['Vendors'], summary: 'Delete vendor by ID' },
+      preHandler: [authenticate, requireRole('admin')],
+    },
     async (request: FastifyRequest, reply: FastifyReply) => {
       const { id } = vendorIdParamsSchema.parse(request.params)
 
       const existing = await request.server.prisma.vendor.findUnique({ where: { id } })
-      if (!existing || existing.deletedAt) {
+      if (!existing || existing.isDeleted) {
         return reply.status(404).send({ error: 'Vendor not found' })
       }
 
-      // Check for active invoices and reconciled-but-unpaid GRNs in parallel
       const [activeInvoices, unpaidGrns] = await Promise.all([
         request.server.prisma.invoice.count({
           where: { vendorId: id, status: { in: BLOCKING_INVOICE_STATUSES } },
         }),
         request.server.prisma.grnEntry.count({
-          where: {
-            status: 'reconciled',
-            invoice: { vendorId: id },
-          },
+          where: { status: 'reconciled', invoice: { vendorId: id } },
         }),
       ])
 
@@ -261,25 +354,86 @@ export default async function vendorsRoutes(fastify: FastifyInstance) {
         })
       }
 
-      const now = new Date()
       await request.server.prisma.vendor.update({
         where: { id },
-        data: { deletedAt: now, isActive: false },
+        data: { isDeleted: true, isActive: false },
       })
 
-      await request.server.prisma.auditLog.create({
-        data: {
-          userId: uid(request),
-          action: 'DELETE',
-          entityType: 'Vendor',
-          entityId: id,
-          oldValue: { name: existing.name, isActive: existing.isActive } as unknown as Prisma.InputJsonValue,
-          newValue: { deletedAt: now.toISOString() } as unknown as Prisma.InputJsonValue,
-          ipAddress: request.ip,
+      if (AUDIT_LOG_ENABLED) {
+        await request.server.prisma.auditLog.create({
+          data: {
+            userId: uid(request),
+            action: 'DELETE',
+            entityType: 'Vendor',
+            entityId: id,
+            oldValue: { name: existing.name, isActive: existing.isActive } as unknown as Prisma.InputJsonValue,
+            newValue: { isDeleted: true } as unknown as Prisma.InputJsonValue,
+            ipAddress: request.ip,
+          },
+        })
+      }
+
+      cacheService.deleteByPrefix(`vendors_${request.user.activeHospitalId ?? 'global'}`)
+      return { success: true }
+    },
+  )
+
+  // POST /vendors/:id/opening-balance
+  fastify.post(
+    '/:id/opening-balance',
+    {
+      schema: { tags: ['Vendors'], summary: 'Upsert vendor opening balance' },
+      preHandler: [authenticate, requireRole('admin')],
+    },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const { id } = vendorIdParamsSchema.parse(request.params)
+      const body = openingBalanceBodySchema.parse(request.body)
+      const hospitalId = request.user.activeHospitalId
+      if (!hospitalId) return reply.status(400).send({ error: 'No active hospital selected' })
+
+      const vendor = await request.server.prisma.vendor.findFirst({
+        where: { id, isDeleted: false },
+      })
+      if (!vendor) return reply.status(404).send({ error: 'Vendor not found' })
+
+      const record = await request.server.prisma.vendorOpeningBalance.upsert({
+        where: { vendorId_hospitalId: { vendorId: id, hospitalId } },
+        update: {
+          asOfDate: new Date(body.asOfDate),
+          amount: body.amount,
+          notes: body.notes ?? null,
+        },
+        create: {
+          vendorId: id,
+          hospitalId,
+          asOfDate: new Date(body.asOfDate),
+          amount: body.amount,
+          notes: body.notes ?? null,
+          createdBy: uid(request),
         },
       })
 
-      return { success: true }
+      return reply.status(200).send(record)
+    },
+  )
+
+  // GET /vendors/:id/opening-balance
+  fastify.get(
+    '/:id/opening-balance',
+    {
+      schema: { tags: ['Vendors'], summary: 'Get vendor opening balance' },
+      preHandler: [authenticate, requireRole('admin')],
+    },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const { id } = vendorIdParamsSchema.parse(request.params)
+      const hospitalId = request.user.activeHospitalId
+      if (!hospitalId) return reply.status(400).send({ error: 'No active hospital selected' })
+
+      const record = await request.server.prisma.vendorOpeningBalance.findUnique({
+        where: { vendorId_hospitalId: { vendorId: id, hospitalId } },
+      })
+
+      return reply.send(record ?? null)
     },
   )
 }

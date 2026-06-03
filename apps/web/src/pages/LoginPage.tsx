@@ -1,5 +1,4 @@
 import { useState } from 'react'
-import { Link } from 'react-router-dom'
 import { useLogin } from '../hooks/useAuth'
 import type { AxiosError } from 'axios'
 
@@ -176,13 +175,8 @@ export default function LoginPage() {
           </button>
         </form>
 
-        <div style={{ textAlign: 'center', marginTop: '1.25rem', fontSize: '0.875rem' }}>
-          <Link
-            to="/forgot-password"
-            style={{ color: '#6b7280', textDecoration: 'underline' }}
-          >
-            Forgot your password?
-          </Link>
+        <div style={{ textAlign: 'center', marginTop: '1.25rem', fontSize: '0.875rem', color: '#6b7280' }}>
+          Contact your administrator to reset your password.
         </div>
       </div>
 

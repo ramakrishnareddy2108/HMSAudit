@@ -9,6 +9,7 @@ import { Label } from '@/components/ui/label'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { InvoiceCard, type Invoice } from '@/components/invoices/InvoiceCard'
+import { useAuthStore } from '@/stores/authStore'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -168,6 +169,12 @@ function FilterDrawer({ open, onClose, pending, onChange, onApply, onReset }: Fi
 
 export default function InvoiceListPage() {
   const navigate = useNavigate()
+  const { user, isSuperAdminUser } = useAuthStore()
+  const canSeeAdminTabs = user?.role === 'admin' || isSuperAdminUser()
+  const canUpload = user?.role !== 'role_2'
+  const visibleTabs = TABS.filter(
+    (tab) => (tab.value === 'reconciled' || tab.value === 'paid') ? canSeeAdminTabs : true,
+  )
 
   const [activeTab, setActiveTab] = useState<TabStatus>('all')
   const [searchOpen, setSearchOpen] = useState(false)
@@ -176,6 +183,7 @@ export default function InvoiceListPage() {
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [pendingFilter, setPendingFilter] = useState<AppliedFilter>(EMPTY_FILTER)
   const [appliedFilter, setAppliedFilter] = useState<AppliedFilter>(EMPTY_FILTER)
+  const [showDeleted, setShowDeleted] = useState(false)
 
   const searchRef = useRef<HTMLInputElement>(null)
 
@@ -223,13 +231,14 @@ export default function InvoiceListPage() {
     }
 
     if (appliedFilter.billType) params.billType = appliedFilter.billType
+    if (showDeleted && canSeeAdminTabs) params.showDeleted = true
 
     return params
   }
 
   const { data, isLoading, isFetchingNextPage, fetchNextPage, hasNextPage } =
     useInfiniteQuery<InvoiceListResponse>({
-      queryKey: ['invoices', activeTab, debouncedSearch, appliedFilter] as const,
+      queryKey: ['invoices', activeTab, debouncedSearch, appliedFilter, showDeleted] as const,
       queryFn: ({ pageParam }) =>
         api
           .get('/invoices', { params: buildApiParams(pageParam as number) })
@@ -272,6 +281,20 @@ export default function InvoiceListPage() {
         </div>
 
         <div className="flex items-center gap-1.5 shrink-0">
+          {canSeeAdminTabs && (
+            <button
+              onClick={() => setShowDeleted(!showDeleted)}
+              className={cn(
+                'px-2 py-1 text-xs rounded-md border transition-colors',
+                showDeleted
+                  ? 'bg-destructive text-destructive-foreground border-destructive'
+                  : 'border-input text-muted-foreground hover:bg-accent',
+              )}
+            >
+              {showDeleted ? 'Hide deleted' : 'Show deleted'}
+            </button>
+          )}
+
           <button
             onClick={() => {
               if (searchOpen) {
@@ -301,16 +324,18 @@ export default function InvoiceListPage() {
             )}
           </button>
 
-          <Button size="sm" onClick={() => navigate('/invoices/new')}>
-            <Plus size={16} className="mr-1.5" />
-            New Invoice
-          </Button>
+          {canUpload && (
+            <Button size="sm" onClick={() => navigate('/invoices/new')}>
+              <Plus size={16} className="mr-1.5" />
+              New Invoice
+            </Button>
+          )}
         </div>
       </div>
 
       {/* Status tabs */}
       <div className="flex gap-0 border-b mb-4 overflow-x-auto">
-        {TABS.map((tab) => (
+        {visibleTabs.map((tab) => (
           <button
             key={tab.value}
             onClick={() => setActiveTab(tab.value)}
@@ -360,12 +385,14 @@ export default function InvoiceListPage() {
             <>
               <p className="font-medium">No invoices this month</p>
               <p className="text-sm text-muted-foreground">
-                Upload your first invoice to get started.
+                {canUpload ? 'Upload your first invoice to get started.' : 'No invoices found for this period.'}
               </p>
-              <Button size="sm" onClick={() => navigate('/invoices/new')}>
-                <Plus size={14} className="mr-1.5" />
-                Upload your first invoice
-              </Button>
+              {canUpload && (
+                <Button size="sm" onClick={() => navigate('/invoices/new')}>
+                  <Plus size={14} className="mr-1.5" />
+                  Upload your first invoice
+                </Button>
+              )}
             </>
           )}
         </div>

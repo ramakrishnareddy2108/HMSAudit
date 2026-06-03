@@ -1,5 +1,10 @@
+import vision from '@google-cloud/vision'
 import OpenAI from 'openai'
 import { config } from '../config'
+
+const visionClient = new vision.ImageAnnotatorClient({
+  apiKey: config.google.visionApiKey,
+})
 
 interface OcrConfidence {
   vendorName: number
@@ -20,6 +25,7 @@ interface OcrExtractedData {
 export interface OcrResult extends OcrExtractedData {
   rawText: string
   modelUsed: string
+  failed: boolean
 }
 
 const EXTRACTION_SYSTEM_PROMPT = `You are an invoice data extraction specialist
@@ -60,49 +66,49 @@ export class OcrService {
     })
   }
 
-  async extractFromUrl(fileUrl: string): Promise<OcrResult> {
-    const rawText = await this.callGoogleVision(fileUrl)
-    const extracted = await this.callOpenAIExtraction(rawText)
+  async extractFromUrl(fileUrl: string, invoiceNumber = 'unknown'): Promise<OcrResult> {
+    let rawText = ''
+    try {
+      console.log(`[OCR] Vision API called — invoice: ${invoiceNumber}`)
+      rawText = await this.callGoogleVision(fileUrl)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(`[OCR] Failed — ${msg}, invoice created without OCR data`)
+      return this.emptyResult('', true)
+    }
+    try {
+      const extracted = await this.callOpenAIExtraction(rawText)
+      return { ...extracted, rawText, modelUsed: config.openai.ocrModel, failed: false }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      console.error(`[OCR] Failed — ${msg}, invoice created without OCR data`)
+      return this.emptyResult(rawText, false)
+    }
+  }
+
+  private emptyResult(rawText = '', failed = false): OcrResult {
     return {
-      ...extracted,
+      vendorName: null,
+      invoiceNumber: null,
+      invoiceDate: null,
+      invoiceAmount: null,
+      currency: null,
+      confidence: { vendorName: 0, invoiceNumber: 0, invoiceDate: 0, invoiceAmount: 0 },
       rawText,
       modelUsed: config.openai.ocrModel,
+      failed,
     }
   }
 
   private async callGoogleVision(imageUrl: string): Promise<string> {
-    const requestBody = {
-      requests: [
-        {
-          image: { source: { imageUri: imageUrl } },
-          features: [{ type: 'DOCUMENT_TEXT_DETECTION', maxResults: 1 }],
-        },
-      ],
-    }
-
-    const response = await fetch(
-      `https://vision.googleapis.com/v1/images:annotate?key=${config.google.visionApiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody),
-      },
-    )
-
-    if (!response.ok) {
-      throw new Error(`Google Vision API error: ${response.status} ${response.statusText}`)
-    }
-
-    const data = (await response.json()) as {
-      responses?: Array<{ fullTextAnnotation?: { text?: string } }>
-    }
-    const fullText = data.responses?.[0]?.fullTextAnnotation?.text
-
-    if (!fullText) {
+    const [result] = await visionClient.documentTextDetection({
+      image: { source: { imageUri: imageUrl } },
+    })
+    const text = result.fullTextAnnotation?.text
+    if (!text) {
       throw new Error('Google Vision returned no text — image may be unreadable')
     }
-
-    return fullText
+    return text
   }
 
   private async callOpenAIExtraction(rawText: string): Promise<OcrExtractedData> {

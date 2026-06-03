@@ -95,28 +95,23 @@ export function ReviewSubmitStep({ state, onBack }: Props) {
         if (state.miscCategory.trim()) meta.miscCategory = state.miscCategory.trim()
         if (state.miscDescription.trim()) meta.miscDescription = state.miscDescription.trim()
       }
+      if (state.billType === 'grn_bill' && state.grns.length > 0) {
+        meta.grns = state.grns.map((g) => ({
+          grnNumber: g.grnNumber.trim(),
+          grnAmount: parseFloat(g.grnAmount),
+          ...(g.grnDate ? { grnDate: g.grnDate } : {}),
+        }))
+      }
       fd.append('data', JSON.stringify(meta))
 
       const { id } = await api
         .post('/invoices', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
         .then((r) => r.data as { id: string })
 
-      if (state.billType === 'grn_bill' && state.grns.length > 0) {
-        await Promise.all(
-          state.grns.map((g) =>
-            api.post(`/invoices/${id}/grns`, {
-              grnNumber: g.grnNumber.trim(),
-              grnAmount: parseFloat(g.grnAmount),
-              ...(g.grnDate ? { grnDate: g.grnDate } : {}),
-            }),
-          ),
-        )
-      }
-
       return id
     },
     onSuccess: (id) => {
-      toast.success('Invoice submitted — OCR processing started')
+      toast.success('Invoice submitted for review')
       navigate(`/invoices/${id}`)
     },
     onError: (err: unknown) => {

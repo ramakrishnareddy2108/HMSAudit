@@ -7,3 +7,5 @@ allowBuilds:
   esbuild: true
   msgpackr-extract: true
   prisma: true
+  protobufjs: true
+  sharp: true

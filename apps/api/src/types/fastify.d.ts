@@ -10,6 +10,20 @@ declare module 'fastify' {
   }
 
   interface FastifyRequest {
-    user: User
+    user: User & {
+      activeHospitalId: string | null
+      departments: {
+        id: string
+        userId: string
+        departmentId: string
+        department: {
+          id: string
+          name: string
+          isActive: boolean
+          hospitalId: string
+          createdAt: Date
+        }
+      }[]
+    }
   }
 }

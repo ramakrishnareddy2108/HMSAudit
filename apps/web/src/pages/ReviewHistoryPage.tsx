@@ -2,22 +2,20 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { format, parseISO } from 'date-fns'
-import { ClipboardCheck, Search } from 'lucide-react'
+import { History, Search } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
-// ── Types ─────────────────────────────────────────────────────────────────────
-
-interface ReviewInvoice {
+interface ReviewedInvoice {
   id: string
   invoiceNumber: string
   invoiceDate: string | null
   invoiceAmount: string
   billType: 'grn_bill' | 'miscellaneous'
-  status: 'pending_review' | 're_submitted'
-  currentVersionNo: number
+  status: 'approved' | 'sent_back'
   createdAt: string
+  submittedAt: string | null
   vendor: { id: string; name: string }
   department: { id: string; name: string } | null
   uploader: { id: string; name: string }
@@ -25,17 +23,13 @@ interface ReviewInvoice {
 }
 
 interface ListResponse {
-  data: ReviewInvoice[]
+  data: ReviewedInvoice[]
   pagination: { total: number }
 }
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function formatIndianCurrency(amount: string): string {
   return '₹' + new Intl.NumberFormat('en-IN').format(parseFloat(amount))
 }
-
-// ── Skeleton ──────────────────────────────────────────────────────────────────
 
 function SkeletonRow() {
   return (
@@ -50,44 +44,47 @@ function SkeletonRow() {
   )
 }
 
-// ── Tab toggle ────────────────────────────────────────────────────────────────
+type HistoryTab = 'all' | 'approved' | 'sent_back'
 
-type QueueTab = 'pending_review' | 're_submitted' | 'all'
-
-const TABS: { value: QueueTab; label: string }[] = [
-  { value: 'all', label: 'All Pending' },
-  { value: 'pending_review', label: 'New' },
-  { value: 're_submitted', label: 'Re-submitted' },
+const TABS: { value: HistoryTab; label: string }[] = [
+  { value: 'all', label: 'All' },
+  { value: 'approved', label: 'Approved' },
+  { value: 'sent_back', label: 'Sent Back' },
 ]
 
-// ── Main Page ─────────────────────────────────────────────────────────────────
+const STATUS_STYLES: Record<string, string> = {
+  approved: 'bg-green-100 text-green-800',
+  sent_back: 'bg-red-100 text-red-800',
+}
 
-export default function ReviewQueuePage() {
+const STATUS_LABELS: Record<string, string> = {
+  approved: 'Approved',
+  sent_back: 'Sent Back',
+}
+
+export default function ReviewHistoryPage() {
   const navigate = useNavigate()
-  const [activeTab, setActiveTab] = useState<QueueTab>('all')
+  const [activeTab, setActiveTab] = useState<HistoryTab>('all')
   const [search, setSearch] = useState('')
 
-  const queryParams = {
-    limit: 50,
-    ...(activeTab !== 'all' ? { status: activeTab } : { status: 'pending_review,re_submitted' }),
-    ...(search.trim() ? { search: search.trim() } : {}),
-  }
-
   const { data, isLoading } = useQuery<ListResponse>({
-    queryKey: ['review-queue', activeTab, search],
-    queryFn: () =>
-      activeTab === 'all'
-        ? Promise.all([
-            api.get('/invoices', { params: { limit: 50, status: 'pending_review', ...(search.trim() ? { search: search.trim() } : {}) } }).then((r) => r.data),
-            api.get('/invoices', { params: { limit: 50, status: 're_submitted', ...(search.trim() ? { search: search.trim() } : {}) } }).then((r) => r.data),
-          ]).then(([a, b]) => ({
-            data: [...a.data, ...b.data].sort(
-              (x: ReviewInvoice, y: ReviewInvoice) =>
-                new Date(x.createdAt).getTime() - new Date(y.createdAt).getTime(),
-            ),
-            pagination: { total: a.pagination.total + b.pagination.total },
-          }))
-        : api.get('/invoices', { params: queryParams }).then((r) => r.data),
+    queryKey: ['review-history', activeTab, search],
+    queryFn: () => {
+      const base = { limit: 50, ...(search.trim() ? { search: search.trim() } : {}) }
+      if (activeTab === 'all') {
+        return Promise.all([
+          api.get('/invoices', { params: { ...base, status: 'approved' } }).then((r) => r.data),
+          api.get('/invoices', { params: { ...base, status: 'sent_back' } }).then((r) => r.data),
+        ]).then(([a, b]) => ({
+          data: [...a.data, ...b.data].sort(
+            (x: ReviewedInvoice, y: ReviewedInvoice) =>
+              new Date(y.createdAt).getTime() - new Date(x.createdAt).getTime(),
+          ),
+          pagination: { total: a.pagination.total + b.pagination.total },
+        }))
+      }
+      return api.get('/invoices', { params: { ...base, status: activeTab } }).then((r) => r.data)
+    },
     staleTime: 15_000,
   })
 
@@ -96,13 +93,12 @@ export default function ReviewQueuePage() {
 
   return (
     <div>
-      {/* Header */}
       <div className="flex items-center justify-between mb-5">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Review Queue</h1>
+          <h1 className="text-2xl font-bold tracking-tight">Reviewed History</h1>
           {!isLoading && (
             <p className="text-sm text-muted-foreground mt-0.5">
-              {totalCount} invoice{totalCount !== 1 ? 's' : ''} awaiting review
+              {totalCount} invoice{totalCount !== 1 ? 's' : ''} reviewed
             </p>
           )}
         </div>
@@ -120,7 +116,6 @@ export default function ReviewQueuePage() {
         </div>
       </div>
 
-      {/* Tabs */}
       <div className="flex gap-0 border-b mb-4">
         {TABS.map((tab) => (
           <button
@@ -138,34 +133,27 @@ export default function ReviewQueuePage() {
         ))}
       </div>
 
-      {/* List */}
       <div className="rounded-lg border bg-card overflow-hidden">
         {isLoading ? (
           Array.from({ length: 5 }).map((_, i) => <SkeletonRow key={i} />)
         ) : invoices.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-16 gap-3 text-center">
-            <ClipboardCheck size={32} className="text-muted-foreground" />
-            <p className="font-medium">No invoices in this queue</p>
+            <History size={32} className="text-muted-foreground" />
+            <p className="font-medium">No reviewed invoices</p>
             <p className="text-sm text-muted-foreground">
-              {search ? 'Try a different search term.' : 'All caught up!'}
+              {search ? 'Try a different search term.' : 'Invoices you review will appear here.'}
             </p>
           </div>
         ) : (
           invoices.map((invoice) => (
             <button
               key={invoice.id}
-              onClick={() => navigate(`/review/${invoice.id}`)}
+              onClick={() => navigate(`/invoices/${invoice.id}`)}
               className="w-full flex items-start gap-4 px-4 py-3.5 border-b last:border-0 hover:bg-accent/40 transition-colors text-left"
             >
-              {/* Left: vendor + meta */}
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-medium text-sm">{invoice.vendor.name}</span>
-                  {invoice.currentVersionNo > 1 && (
-                    <Badge className="border-transparent bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300 text-[10px] px-1.5 py-0">
-                      Revised ×{invoice.currentVersionNo}
-                    </Badge>
-                  )}
                 </div>
                 <p className="text-xs text-muted-foreground mt-0.5">
                   #{invoice.invoiceNumber}
@@ -179,21 +167,17 @@ export default function ReviewQueuePage() {
                 )}
               </div>
 
-              {/* Amount */}
               <span className="text-sm font-medium tabular-nums whitespace-nowrap">
                 {formatIndianCurrency(invoice.invoiceAmount)}
               </span>
 
-              {/* Status badge */}
               <Badge
                 className={cn(
                   'text-[10px] px-2 py-0.5 border-transparent shrink-0',
-                  invoice.status === 'pending_review'
-                    ? 'bg-yellow-100 text-yellow-800'
-                    : 'bg-blue-100 text-blue-800',
+                  STATUS_STYLES[invoice.status] ?? '',
                 )}
               >
-                {invoice.status === 'pending_review' ? 'New' : 'Re-submitted'}
+                {STATUS_LABELS[invoice.status] ?? invoice.status}
               </Badge>
             </button>
           ))

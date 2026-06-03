@@ -33,6 +33,7 @@ enum GrnEntryStatus {
   pending
   reconciled
   disputed
+  partial_paid
   paid
 }
 
@@ -50,14 +51,21 @@ enum ReconciliationStatus {
 enum MatchStatus {
   matched
   amount_diff
-  app_only
+  grn_not_found
+  invoice_only
   excel_only
 }
 
 enum Resolution {
+  auto_matched
   accepted_app
   accepted_excel
+  accepted_partial
   disputed
+  not_required
+  override_valid
+  pending_upload
+  sent_back
 }
 
 enum ConflictResolution {
@@ -79,18 +87,49 @@ enum OcrStatus {
   failed
 }
 
-model Department {
+model Hospital {
   id        String   @id @default(uuid())
   name      String   @unique
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
+  users                User[]
+  vendors              Vendor[]
+  invoices             Invoice[]
+  grnEntries           GrnEntry[]
+  grnMasters           GrnMaster[]
+  grnSyncRuns          GrnSyncRun[]
+  grnConflicts         GrnConflict[]
+  reconciliationRuns   ReconciliationRun[]
+  reconResults         ReconResult[]
+  payments             Payment[]
+  departments          Department[]
+  auditLogs            AuditLog[]
+  notifications        Notification[]
+  vendorOpeningBalances VendorOpeningBalance[]
+}
+
+model Department {
+  id         String   @id @default(uuid())
+  hospitalId String
+  name       String
+  isActive   Boolean  @default(true)
+  isDeleted  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  hospital Hospital        @relation(fields: [hospitalId], references: [id])
   users    UserDepartment[]
   invoices Invoice[]
+
+  @@index([hospitalId])
+  @@index([hospitalId, name])
+  @@index([isDeleted])
 }
 
 model Vendor {
-  id                String    @id @default(uuid())
+  id                String  @id @default(uuid())
+  hospitalId        String
   name              String
   contactName       String?
   phone             String?
@@ -101,42 +140,51 @@ model Vendor {
   bankIfscCode      String?
   bankAccountName   String?
   bankBranch        String?
-  isActive          Boolean   @default(true)
-  deletedAt         DateTime?
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
+  isActive          Boolean  @default(true)
+  isDeleted         Boolean  @default(false)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 
-  invoices  Invoice[]
-  grnMaster GrnMaster[]
-  payments  Payment[]
+  hospital              Hospital               @relation(fields: [hospitalId], references: [id])
+  invoices              Invoice[]
+  grnMaster             GrnMaster[]
+  payments              Payment[]
+  vendorOpeningBalances VendorOpeningBalance[]
 
+  @@index([hospitalId])
   @@index([name])
   @@index([isActive])
-  @@index([deletedAt])
+  @@index([isDeleted])
 }
 
 model User {
-  id        String   @id @default(uuid())
-  name      String
-  email     String   @unique
-  role      Role
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
+  id           String   @id @default(uuid())
+  supabaseId   String?  @unique
+  name         String
+  email        String   @unique
+  role         Role
+  hospitalId   String?
+  isSuperAdmin Boolean  @default(false)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
 
-  departments         UserDepartment[]
-  uploadedInvoices    Invoice[]           @relation("UploadedBy")
-  reviewedInvoices    Invoice[]           @relation("ReviewedBy")
-  invoiceVersions     InvoiceVersion[]
-  grnSyncRuns         GrnSyncRun[]
-  conflictResolutions GrnConflict[]
-  reconRuns           ReconciliationRun[]
-  reconResolutions    ReconResult[]
-  payments            Payment[]
-  auditLogs           AuditLog[]
-  notifications       Notification[]
+  hospital              Hospital?              @relation(fields: [hospitalId], references: [id])
+  departments           UserDepartment[]
+  uploadedInvoices      Invoice[]              @relation("UploadedBy")
+  reviewedInvoices      Invoice[]              @relation("ReviewedBy")
+  invoiceVersions       InvoiceVersion[]
+  grnSyncRuns           GrnSyncRun[]
+  conflictResolutions   GrnConflict[]
+  reconRuns             ReconciliationRun[]
+  reconResolutions      ReconResult[]
+  payments              Payment[]
+  auditLogs             AuditLog[]
+  notifications         Notification[]
+  vendorOpeningBalances VendorOpeningBalance[]
 
   @@index([email])
   @@index([role])
+  @@index([hospitalId])
 }
 
 model UserDepartment {
@@ -151,6 +199,7 @@ model UserDepartment {
 
 model Invoice {
   id               String        @id @default(uuid())
+  hospitalId       String
   vendorId         String
   invoiceNumber    String
   invoiceDate      DateTime?
@@ -160,6 +209,7 @@ model Invoice {
   miscCategory     String?
   miscDescription  String?
   fileUrl          String?
+  fileHash         String?
   ocrRawText       String?
   ocrExtractedJson Json?
   ocrStatus        OcrStatus     @default(pending)
@@ -173,22 +223,29 @@ model Invoice {
   uploadedBy       String
   reviewedBy       String?
   reviewerNote     String?
+  isDeleted        Boolean       @default(false)
+  deletedAt        DateTime?
+  deletedBy        String?
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
 
-  vendor     Vendor       @relation(fields: [vendorId], references: [id])
-  department Department?  @relation(fields: [departmentId], references: [id])
-  uploader   User         @relation("UploadedBy", fields: [uploadedBy], references: [id])
-  reviewer   User?        @relation("ReviewedBy", fields: [reviewedBy], references: [id])
+  hospital   Hospital        @relation(fields: [hospitalId], references: [id])
+  vendor     Vendor          @relation(fields: [vendorId], references: [id])
+  department Department?     @relation(fields: [departmentId], references: [id])
+  uploader   User            @relation("UploadedBy", fields: [uploadedBy], references: [id])
+  reviewer   User?           @relation("ReviewedBy", fields: [reviewedBy], references: [id])
   versions   InvoiceVersion[]
   grnEntries GrnEntry[]
 
+  @@index([hospitalId])
   @@index([vendorId])
   @@index([status])
   @@index([uploadedBy])
   @@index([departmentId])
   @@index([invoiceNumber])
   @@index([createdAt])
+  @@index([fileHash])
+  @@index([isDeleted])
   @@unique([vendorId, invoiceNumber])
 }
 
@@ -201,6 +258,8 @@ model InvoiceVersion {
   statusAtChange InvoiceStatus
   changedBy      String
   changeReason   String?
+  changeSummary  Json?
+  grnSnapshot    Json?
   createdAt      DateTime      @default(now())
 
   invoice       Invoice @relation(fields: [invoiceId], references: [id])
@@ -210,65 +269,81 @@ model InvoiceVersion {
 }
 
 model GrnEntry {
-  id        String         @id @default(uuid())
-  invoiceId String
-  grnNumber String         @unique
-  grnAmount Decimal        @db.Decimal(12, 2)
-  grnDate   DateTime?
-  status    GrnEntryStatus @default(pending)
-  createdAt DateTime       @default(now())
-  updatedAt DateTime       @updatedAt
+  id         String         @id @default(uuid())
+  hospitalId String
+  invoiceId  String
+  grnNumber  String         @unique
+  grnAmount  Decimal        @db.Decimal(12, 2)
+  paidAmount Decimal        @default(0) @db.Decimal(12, 2)
+  grnDate    DateTime?
+  status     GrnEntryStatus @default(pending)
+  isDeleted  Boolean        @default(false)
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
 
+  hospital     Hospital      @relation(fields: [hospitalId], references: [id])
   invoice      Invoice       @relation(fields: [invoiceId], references: [id])
   reconResults ReconResult[]
   paymentGrns  PaymentGrn[]
 
+  @@index([hospitalId])
   @@index([invoiceId])
   @@index([grnNumber])
   @@index([status])
+  @@index([isDeleted])
 }
 
 model GrnMaster {
   id            String    @id @default(uuid())
+  hospitalId    String
   vendorId      String?
   invoiceNumber String?
   grnNumber     String
   grnAmount     Decimal   @db.Decimal(12, 2)
   grnDate       DateTime?
   syncRunId     String?
+  pendingUpload Boolean   @default(false)
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
+  rawExcelData  Json?
+
+  hospital     Hospital      @relation(fields: [hospitalId], references: [id])
   vendor       Vendor?       @relation(fields: [vendorId], references: [id])
   syncRun      GrnSyncRun?   @relation(fields: [syncRunId], references: [id])
   reconResults ReconResult[]
 
+  @@index([hospitalId])
   @@index([grnNumber])
   @@index([vendorId])
   @@index([syncRunId])
 }
 
 model GrnSyncRun {
-  id        String        @id @default(uuid())
-  fileUrl   String?
-  runBy     String
-  totalRows Int           @default(0)
-  inserted  Int           @default(0)
-  skipped   Int           @default(0)
-  conflicts Int           @default(0)
-  status    SyncRunStatus @default(processing)
-  createdAt DateTime      @default(now())
+  id         String        @id @default(uuid())
+  hospitalId String
+  fileUrl    String?
+  runBy      String
+  totalRows  Int           @default(0)
+  inserted   Int           @default(0)
+  skipped    Int           @default(0)
+  conflicts  Int           @default(0)
+  status     SyncRunStatus @default(processing)
+  createdAt  DateTime      @default(now())
 
-  runner        User          @relation(fields: [runBy], references: [id])
+  hospital     Hospital      @relation(fields: [hospitalId], references: [id])
+  runner       User          @relation(fields: [runBy], references: [id])
   grnMasterRows GrnMaster[]
   grnConflicts  GrnConflict[]
 
+  @@index([hospitalId])
   @@index([status])
   @@index([createdAt])
 }
 
 model GrnConflict {
   id           String              @id @default(uuid())
+  hospitalId   String
   syncRunId    String
   grnNumber    String
   systemAmount Decimal             @db.Decimal(12, 2)
@@ -277,17 +352,21 @@ model GrnConflict {
   resolution   ConflictResolution?
   adminNote    String?
   resolvedAt   DateTime?
+  rawExcelData Json?
   createdAt    DateTime            @default(now())
 
-  syncRun  GrnSyncRun @relation(fields: [syncRunId], references: [id])
-  resolver User?      @relation(fields: [resolvedBy], references: [id])
+  hospital Hospital    @relation(fields: [hospitalId], references: [id])
+  syncRun  GrnSyncRun  @relation(fields: [syncRunId], references: [id])
+  resolver User?       @relation(fields: [resolvedBy], references: [id])
 
+  @@index([hospitalId])
   @@index([syncRunId])
   @@index([grnNumber])
 }
 
 model ReconciliationRun {
   id              String               @id @default(uuid())
+  hospitalId      String
   periodMonth     Int
   periodYear      Int
   runBy           String
@@ -300,32 +379,40 @@ model ReconciliationRun {
   completedBy     String?
   createdAt       DateTime             @default(now())
 
-  runner  User          @relation(fields: [runBy], references: [id])
-  results ReconResult[]
+  hospital Hospital      @relation(fields: [hospitalId], references: [id])
+  runner   User          @relation(fields: [runBy], references: [id])
+  results  ReconResult[]
 
+  @@index([hospitalId])
   @@index([periodMonth, periodYear])
   @@index([status])
 }
 
 model ReconResult {
   id          String      @id @default(uuid())
+  hospitalId  String
   reconRunId  String
   grnEntryId  String?
   grnMasterId String?
   matchStatus MatchStatus
   appAmount   Decimal?    @db.Decimal(12, 2)
   excelAmount Decimal?    @db.Decimal(12, 2)
-  resolution  Resolution?
-  resolvedBy  String?
-  adminNote   String?
-  resolvedAt  DateTime?
-  createdAt   DateTime    @default(now())
+  resolution     Resolution?
+  resolvedBy     String?
+  adminNote      String?
+  resolvedAt     DateTime?
+  resolvedAmount Decimal?    @db.Decimal(12, 2)
+  sentBackAt     DateTime?
+  sentBackNote   String?
+  createdAt      DateTime    @default(now())
 
+  hospital  Hospital          @relation(fields: [hospitalId], references: [id])
   reconRun  ReconciliationRun @relation(fields: [reconRunId], references: [id])
   grnEntry  GrnEntry?         @relation(fields: [grnEntryId], references: [id])
   grnMaster GrnMaster?        @relation(fields: [grnMasterId], references: [id])
   resolver  User?             @relation(fields: [resolvedBy], references: [id])
 
+  @@index([hospitalId])
   @@index([reconRunId])
   @@index([matchStatus])
   @@index([grnEntryId])
@@ -333,6 +420,7 @@ model ReconResult {
 
 model Payment {
   id             String      @id @default(uuid())
+  hospitalId     String
   vendorId       String
   periodMonth    Int
   periodYear     Int
@@ -346,18 +434,22 @@ model Payment {
   createdBy      String
   createdAt      DateTime    @default(now())
 
+  hospital    Hospital     @relation(fields: [hospitalId], references: [id])
   vendor      Vendor       @relation(fields: [vendorId], references: [id])
   creator     User         @relation(fields: [createdBy], references: [id])
   paymentGrns PaymentGrn[]
 
+  @@index([hospitalId])
   @@index([vendorId])
   @@index([periodMonth, periodYear])
 }
 
 model PaymentGrn {
-  id        String @id @default(uuid())
-  paymentId String
-  grnId     String
+  id         String  @id @default(uuid())
+  paymentId  String
+  grnId      String
+  amountPaid Decimal @db.Decimal(12, 2)
+  isPartial  Boolean @default(false)
 
   payment Payment  @relation(fields: [paymentId], references: [id])
   grn     GrnEntry @relation(fields: [grnId], references: [id])
@@ -367,6 +459,7 @@ model PaymentGrn {
 
 model AuditLog {
   id         String   @id @default(uuid())
+  hospitalId String?
   userId     String?
   action     String
   entityType String
@@ -376,8 +469,10 @@ model AuditLog {
   ipAddress  String?
   createdAt  DateTime @default(now())
 
-  user User? @relation(fields: [userId], references: [id])
+  hospital Hospital? @relation(fields: [hospitalId], references: [id])
+  user     User?     @relation(fields: [userId], references: [id])
 
+  @@index([hospitalId])
   @@index([userId])
   @@index([entityType, entityId])
   @@index([createdAt])
@@ -385,6 +480,7 @@ model AuditLog {
 
 model Notification {
   id         String   @id @default(uuid())
+  hospitalId String?
   userId     String
   title      String
   message    String
@@ -394,8 +490,28 @@ model Notification {
   isRead     Boolean  @default(false)
   createdAt  DateTime @default(now())
 
-  user User @relation(fields: [userId], references: [id])
+  hospital Hospital? @relation(fields: [hospitalId], references: [id])
+  user     User      @relation(fields: [userId], references: [id])
 
+  @@index([hospitalId])
   @@index([userId, isRead])
   @@index([createdAt])
+}
+
+model VendorOpeningBalance {
+  id         String   @id @default(uuid())
+  vendorId   String
+  hospitalId String
+  asOfDate   DateTime @db.Date
+  amount     Decimal  @db.Decimal(12, 2)
+  notes      String?
+  createdBy  String
+  createdAt  DateTime @default(now())
+
+  vendor   Vendor   @relation(fields: [vendorId], references: [id])
+  hospital Hospital @relation(fields: [hospitalId], references: [id])
+  creator  User     @relation(fields: [createdBy], references: [id])
+
+  @@unique([vendorId, hospitalId])
+  @@index([vendorId, hospitalId])
 }

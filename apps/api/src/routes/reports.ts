@@ -1,10 +1,12 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
+import { InvoiceStatus, BillType, GrnEntryStatus, PaymentMode } from '@prisma/client'
 import { z } from 'zod'
 import { authenticate, requireRole } from '../middleware/auth'
 
 const vendorLedgerQuerySchema = z.object({
   vendorId: z.string().uuid(),
-  year: z.coerce.number().int().min(2020).max(2100),
+  dateFrom: z.string().optional(),
+  dateTo: z.string().optional(),
 })
 
 const reconSummaryQuerySchema = z.object({
@@ -23,257 +25,482 @@ const auditLogQuerySchema = z.object({
   dateFrom: z.string().optional(),
   dateTo: z.string().optional(),
   page: z.coerce.number().int().positive().default(1),
-  limit: z.coerce.number().int().positive().max(100).default(20),
+  limit: z.coerce.number().int().min(1).max(500).default(50),
 })
 
 export default async function reportsRoutes(fastify: FastifyInstance) {
   // GET /reports/vendor-ledger
   fastify.get(
     '/vendor-ledger',
-    { preHandler: [authenticate, requireRole('admin')] },
-    async (request: FastifyRequest, _reply: FastifyReply) => {
-      const { vendorId, year } = vendorLedgerQuerySchema.parse(request.query)
+    {
+      schema: { tags: ['Reports'], summary: 'Get vendor ledger with monthly breakdown' },
+      preHandler: [authenticate, requireRole('admin')],
+    },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const { vendorId, dateFrom, dateTo } = vendorLedgerQuerySchema.parse(request.query)
+      const hospitalId = request.user.activeHospitalId
+      if (!hospitalId) return reply.status(400).send({ error: 'No active hospital selected' })
 
-      const startDate = new Date(`${year}-01-01T00:00:00.000Z`)
-      const endDate = new Date(`${year + 1}-01-01T00:00:00.000Z`)
+      const now = new Date()
+      const dateToDate = dateTo
+        ? new Date(dateTo + 'T23:59:59.999Z')
+        : new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59, 999))
+      const dateFromDate = dateFrom
+        ? new Date(dateFrom + 'T00:00:00.000Z')
+        : new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 3, now.getUTCDate()))
 
-      const invoices = await fastify.prisma.invoice.findMany({
-        where: { vendorId, createdAt: { gte: startDate, lt: endDate } },
-        select: {
-          invoiceNumber: true,
-          invoiceAmount: true,
-          createdAt: true,
-          grnEntries: {
-            select: {
-              grnNumber: true,
-              grnAmount: true,
-              status: true,
-              paymentGrns: {
-                take: 1,
-                select: {
-                  payment: {
-                    select: { transactionRef: true, paymentDate: true },
+      const INCLUDED_STATUSES: InvoiceStatus[] = ['approved', 'reconciled', 'paid']
+      const UNDER_REVIEW_STATUSES: InvoiceStatus[] = ['draft', 'pending_review', 'sent_back', 're_submitted']
+
+      const [
+        openingBalance,
+        includedInvoices,
+        underReviewAgg,
+        paymentsInRange,
+        reconciledAgg,
+        readyToPayAgg,
+        needsReconAgg,
+        pendingUploadAgg,
+      ] = await Promise.all([
+        fastify.prisma.vendorOpeningBalance.findUnique({
+          where: { vendorId_hospitalId: { vendorId, hospitalId } },
+        }),
+        fastify.prisma.invoice.findMany({
+          where: {
+            vendorId,
+            status: { in: INCLUDED_STATUSES },
+            invoiceDate: { gte: dateFromDate, lte: dateToDate },
+          },
+          select: {
+            id: true,
+            invoiceNumber: true,
+            invoiceDate: true,
+            invoiceAmount: true,
+            status: true,
+            billType: true,
+            grnEntries: {
+              where: { isDeleted: false },
+              select: {
+                grnNumber: true,
+                grnAmount: true,
+                grnDate: true,
+                status: true,
+                paymentGrns: {
+                  take: 1,
+                  select: {
+                    payment: { select: { transactionRef: true, paymentDate: true } },
                   },
                 },
               },
             },
           },
+          orderBy: { invoiceDate: 'asc' },
+        }),
+        fastify.prisma.invoice.aggregate({
+          where: { vendorId, status: { in: UNDER_REVIEW_STATUSES } },
+          _count: { _all: true },
+          _sum: { invoiceAmount: true },
+        }),
+        fastify.prisma.payment.findMany({
+          where: { vendorId, paymentDate: { gte: dateFromDate, lte: dateToDate } },
+          include: { _count: { select: { paymentGrns: true } } },
+          orderBy: { paymentDate: 'asc' },
+        }),
+        fastify.prisma.paymentGrn.aggregate({
+          where: { grn: { invoice: { vendorId }, isDeleted: false } },
+          _sum: { amountPaid: true },
+        }),
+        fastify.prisma.grnEntry.findMany({
+          where: {
+            invoice: { vendorId, isDeleted: false },
+            status: { in: ['reconciled', 'partial_paid'] },
+          },
+          select: { grnAmount: true, paidAmount: true },
+        }),
+        fastify.prisma.invoice.aggregate({
+          where: { vendorId, status: 'approved' },
+          _sum: { invoiceAmount: true },
+        }),
+        fastify.prisma.grnMaster.aggregate({
+          where: { vendorId, pendingUpload: true },
+          _count: { _all: true },
+          _sum: { grnAmount: true },
+        }),
+      ])
+
+      const openingBalanceAmount = openingBalance ? Number(openingBalance.amount) : 0
+      const totalBilled = includedInvoices.reduce((s, inv) => s + Number(inv.invoiceAmount), 0)
+      const totalPaid = paymentsInRange.reduce((s, p) => s + Number(p.totalAmount), 0)
+      // reconciledAgg is now PaymentGrn aggregate (amountPaid sum = actual paid)
+      const totalReconciled = Number((reconciledAgg as { _sum: { amountPaid?: unknown } })._sum.amountPaid ?? 0)
+      // readyToPayAgg is now an array of partial/reconciled GRNs — sum remaining amounts
+      const readyToPay = (readyToPayAgg as Array<{ grnAmount: unknown; paidAmount: unknown }>).reduce(
+        (s, g) => s + Number(g.grnAmount) - Number(g.paidAmount),
+        0,
+      )
+
+      const summary = {
+        openingBalance: openingBalance ?? null,
+        totalBilled,
+        totalPaid,
+        totalReconciled,
+        totalOutstanding: totalBilled - totalPaid + openingBalanceAmount,
+        readyToPay,
+        needsReconciliation: Number(needsReconAgg._sum.invoiceAmount ?? 0),
+        underReview: {
+          count: underReviewAgg._count._all,
+          amount: Number(underReviewAgg._sum.invoiceAmount ?? 0),
         },
-      })
-
-      type GrnBreakdownItem = {
-        grnNumber: string
-        invoiceNumber: string
-        amount: number
-        status: string
-        paymentRef: string | null
-        paymentDate: Date | null
+        invoiceCount: includedInvoices.length,
       }
 
-      type MonthRow = {
-        month: number
-        year: number
-        invoiced: number
-        reconciled: number
-        paid: number
-        pending: number
-        grnBreakdown: GrnBreakdownItem[]
+      const MONTH_NAMES = [
+        'January', 'February', 'March', 'April', 'May', 'June',
+        'July', 'August', 'September', 'October', 'November', 'December',
+      ]
+
+      type GrnItem = {
+        grnNumber: string; grnAmount: number; grnDate: Date | null
+        status: GrnEntryStatus; paymentRef: string | null; paymentDate: Date | null
+      }
+      type InvoiceItem = {
+        id: string; invoiceNumber: string; invoiceDate: Date | null
+        invoiceAmount: number; status: InvoiceStatus; billType: BillType
+        grns: GrnItem[]; paymentRef: string | null; paymentDate: Date | null
+      }
+      type PaymentItem = {
+        id: string; paymentDate: Date; amount: number
+        paymentMode: PaymentMode; transactionRef: string | null; grnCount: number
+      }
+      type MonthData = {
+        month: number; year: number; label: string
+        openingBalance: number; closingBalance: number
+        monthTotalBilled: number; monthTotalPaid: number
+        invoices: InvoiceItem[]; payments: PaymentItem[]
       }
 
-      const months: MonthRow[] = Array.from({ length: 12 }, (_, i) => ({
-        month: i + 1,
-        year,
-        invoiced: 0,
-        reconciled: 0,
-        paid: 0,
-        pending: 0,
-        grnBreakdown: [],
-      }))
+      // Generate all months from dateFrom to dateTo (oldest → newest)
+      const buckets = new Map<string, MonthData>()
+      {
+        let cur = new Date(Date.UTC(dateFromDate.getUTCFullYear(), dateFromDate.getUTCMonth(), 1))
+        const end = new Date(Date.UTC(dateToDate.getUTCFullYear(), dateToDate.getUTCMonth() + 1, 1))
+        while (cur < end) {
+          const m = cur.getUTCMonth() + 1
+          const y = cur.getUTCFullYear()
+          buckets.set(`${y}-${String(m).padStart(2, '0')}`, {
+            month: m, year: y,
+            label: `${MONTH_NAMES[m - 1]} ${y}`,
+            openingBalance: 0, closingBalance: 0,
+            monthTotalBilled: 0, monthTotalPaid: 0,
+            invoices: [], payments: [],
+          })
+          cur = new Date(Date.UTC(y, m, 1))
+        }
+      }
 
-      for (const invoice of invoices) {
-        const monthIdx = invoice.createdAt.getUTCMonth()
-        const bucket = months[monthIdx]
+      for (const inv of includedInvoices) {
+        if (!inv.invoiceDate) continue
+        const m = inv.invoiceDate.getUTCMonth() + 1
+        const y = inv.invoiceDate.getUTCFullYear()
+        const bucket = buckets.get(`${y}-${String(m).padStart(2, '0')}`)
         if (!bucket) continue
 
-        bucket.invoiced += Number(invoice.invoiceAmount)
+        const grns: GrnItem[] = inv.grnEntries.map((g) => ({
+          grnNumber: g.grnNumber,
+          grnAmount: Number(g.grnAmount),
+          grnDate: g.grnDate,
+          status: g.status,
+          paymentRef: g.paymentGrns[0]?.payment?.transactionRef ?? null,
+          paymentDate: g.paymentGrns[0]?.payment?.paymentDate ?? null,
+        }))
 
-        for (const grn of invoice.grnEntries) {
-          const amount = Number(grn.grnAmount)
-          const payment = grn.paymentGrns[0]?.payment ?? null
-
-          if (grn.status === 'reconciled' || grn.status === 'paid') {
-            bucket.reconciled += amount
-          }
-          if (grn.status === 'paid') {
-            bucket.paid += amount
-          }
-
-          bucket.grnBreakdown.push({
-            grnNumber: grn.grnNumber,
-            invoiceNumber: invoice.invoiceNumber,
-            amount,
-            status: grn.status,
-            paymentRef: payment?.transactionRef ?? null,
-            paymentDate: payment?.paymentDate ?? null,
-          })
-        }
-
-        bucket.pending = bucket.invoiced - bucket.reconciled
+        const firstPaidGrn = inv.grnEntries.find((g) => g.paymentGrns[0]?.payment)
+        bucket.invoices.push({
+          id: inv.id,
+          invoiceNumber: inv.invoiceNumber,
+          invoiceDate: inv.invoiceDate,
+          invoiceAmount: Number(inv.invoiceAmount),
+          status: inv.status,
+          billType: inv.billType,
+          grns,
+          paymentRef: firstPaidGrn?.paymentGrns[0]?.payment?.transactionRef ?? null,
+          paymentDate: firstPaidGrn?.paymentGrns[0]?.payment?.paymentDate ?? null,
+        })
+        bucket.monthTotalBilled += Number(inv.invoiceAmount)
       }
 
-      return months
+      for (const payment of paymentsInRange) {
+        const m = payment.paymentDate.getUTCMonth() + 1
+        const y = payment.paymentDate.getUTCFullYear()
+        const bucket = buckets.get(`${y}-${String(m).padStart(2, '0')}`)
+        if (!bucket) continue
+
+        bucket.payments.push({
+          id: payment.id,
+          paymentDate: payment.paymentDate,
+          amount: Number(payment.totalAmount),
+          paymentMode: payment.paymentMode,
+          transactionRef: payment.transactionRef ?? null,
+          grnCount: payment._count.paymentGrns,
+        })
+        bucket.monthTotalPaid += Number(payment.totalAmount)
+      }
+
+      // Running balance: oldest → newest
+      let runningBalance = openingBalanceAmount
+      const sortedKeys = Array.from(buckets.keys()).sort()
+      const transactionsByMonth: MonthData[] = sortedKeys.map((key) => {
+        const b = buckets.get(key)!
+        b.openingBalance = runningBalance
+        b.closingBalance = runningBalance + b.monthTotalBilled - b.monthTotalPaid
+        runningBalance = b.closingBalance
+        return b
+      })
+      transactionsByMonth.reverse()
+
+      return {
+        summary,
+        transactionsByMonth,
+        pendingUploadGrns: {
+          count: pendingUploadAgg._count._all,
+          totalAmount: Number(pendingUploadAgg._sum.grnAmount ?? 0),
+        },
+      }
     },
   )
 
   // GET /reports/dashboard-stats
   fastify.get(
     '/dashboard-stats',
-    { preHandler: [authenticate, requireRole('admin')] },
-    async (_request: FastifyRequest, _reply: FastifyReply) => {
+    {
+      schema: { tags: ['Reports'], summary: 'Get admin dashboard statistics' },
+      preHandler: [authenticate, requireRole('admin')],
+    },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const hospitalId = request.user.activeHospitalId
+      if (!hospitalId) return reply.status(400).send({ error: 'No active hospital selected' })
+
       const now = new Date()
-      const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
-      const monthEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1))
-      const twelveMonthsAgo = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 11, 1))
+      const MONTH_NAMES = [
+        'January', 'February', 'March', 'April', 'May', 'June',
+        'July', 'August', 'September', 'October', 'November', 'December',
+      ]
+
+      // Last 3 months oldest→newest
+      const months = Array.from({ length: 3 }, (_, i) => {
+        const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - (2 - i), 1))
+        return {
+          month: d.getUTCMonth() + 1,
+          year: d.getUTCFullYear(),
+          start: d,
+          end: new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)),
+          label: `${MONTH_NAMES[d.getUTCMonth()]} ${d.getUTCFullYear()}`,
+        }
+      })
 
       const [
-        totalInvoices,
-        pendingReview,
-        reconciledThisMonth,
-        paidThisMonthAgg,
-        recentActivity,
-        monthlyUploaded,
-        monthlyReconciled,
-        monthlyPaid,
-        vendorCurrentMonth,
+        reviewQueueCount,
+        reviewQueueOldest,
+        sentBackCount,
+        sentBackOldest,
+        unreconciledAgg,
+        unreconciledInvoiceCount,
+        excelOnlyPendingCount,
+        reconciledGrnsRaw,
+        approvedInvoicesRaw,
+        underReviewInvoicesRaw,
+        grnSyncRuns,
+        reconRuns,
       ] = await Promise.all([
-        fastify.prisma.invoice.count(),
         fastify.prisma.invoice.count({
-          where: { status: { in: ['pending_review', 're_submitted'] } },
+          where: { status: { in: ['pending_review', 're_submitted'] }, isDeleted: false },
         }),
-        fastify.prisma.invoice.count({
-          where: { status: 'reconciled', updatedAt: { gte: monthStart, lt: monthEnd } },
-        }),
-        fastify.prisma.payment.aggregate({
-          where: { createdAt: { gte: monthStart, lt: monthEnd } },
-          _sum: { totalAmount: true },
-        }),
-        fastify.prisma.auditLog.findMany({
-          take: 20,
-          orderBy: { createdAt: 'desc' },
-          select: {
-            action: true,
-            entityType: true,
-            createdAt: true,
-            user: { select: { name: true } },
-          },
-        }),
-        fastify.prisma.invoice.findMany({
-          where: { createdAt: { gte: twelveMonthsAgo } },
+        fastify.prisma.invoice.findFirst({
+          where: { status: { in: ['pending_review', 're_submitted'] }, isDeleted: false },
+          orderBy: { createdAt: 'asc' },
           select: { createdAt: true },
         }),
-        fastify.prisma.invoice.findMany({
-          where: { status: 'reconciled', updatedAt: { gte: twelveMonthsAgo } },
-          select: { updatedAt: true },
+        fastify.prisma.invoice.count({
+          where: { status: 'sent_back', isDeleted: false },
         }),
-        fastify.prisma.invoice.findMany({
-          where: { status: 'paid', updatedAt: { gte: twelveMonthsAgo } },
-          select: { updatedAt: true },
+        fastify.prisma.invoice.findFirst({
+          where: { status: 'sent_back', isDeleted: false },
+          orderBy: { createdAt: 'asc' },
+          select: { createdAt: true },
         }),
-        fastify.prisma.invoice.findMany({
-          where: { createdAt: { gte: monthStart, lt: monthEnd } },
+        fastify.prisma.invoice.aggregate({
+          where: { status: 'approved', isDeleted: false },
+          _sum: { invoiceAmount: true },
+        }),
+        fastify.prisma.invoice.count({
+          where: { status: 'approved', isDeleted: false },
+        }),
+        fastify.prisma.grnMaster.count({
+          where: { pendingUpload: true },
+        }),
+        fastify.prisma.grnEntry.findMany({
+          where: { status: 'reconciled', isDeleted: false },
           select: {
-            invoiceAmount: true,
-            vendor: { select: { id: true, name: true } },
-            grnEntries: { select: { grnAmount: true, status: true } },
+            grnAmount: true,
+            invoice: { select: { vendor: { select: { id: true, name: true } } } },
           },
+        }),
+        fastify.prisma.invoice.findMany({
+          where: { status: 'approved', isDeleted: false },
+          select: { invoiceAmount: true, vendor: { select: { id: true, name: true } } },
+        }),
+        fastify.prisma.invoice.findMany({
+          where: {
+            status: { in: ['draft', 'pending_review', 'sent_back', 're_submitted'] },
+            isDeleted: false,
+          },
+          select: { invoiceAmount: true, vendor: { select: { id: true, name: true } } },
+        }),
+        fastify.prisma.grnSyncRun.findMany({
+          where: {
+            createdAt: { gte: months[0].start },
+            status: { in: ['completed', 'has_conflicts'] },
+          },
+          select: { createdAt: true },
+        }),
+        fastify.prisma.reconciliationRun.findMany({
+          where: {
+            OR: months.map(({ month, year }) => ({ periodMonth: month, periodYear: year })),
+            status: 'completed',
+          },
+          select: { id: true, periodMonth: true, periodYear: true },
+          orderBy: { createdAt: 'desc' },
         }),
       ])
 
-      type ChartRow = { month: number; year: number; uploaded: number; reconciled: number; paid: number }
-      const chartMap = new Map<string, ChartRow>()
+      // ── pendingActions ────────────────────────────────────────────────────
+      const daysSince = (d: Date) =>
+        Math.floor((now.getTime() - d.getTime()) / (1000 * 60 * 60 * 24))
 
-      for (let i = 11; i >= 0; i--) {
-        const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1))
-        const key = `${d.getUTCFullYear()}-${d.getUTCMonth() + 1}`
-        chartMap.set(key, {
-          month: d.getUTCMonth() + 1,
-          year: d.getUTCFullYear(),
-          uploaded: 0,
-          reconciled: 0,
-          paid: 0,
-        })
-      }
-
-      for (const inv of monthlyUploaded) {
-        const key = `${inv.createdAt.getUTCFullYear()}-${inv.createdAt.getUTCMonth() + 1}`
-        const b = chartMap.get(key)
-        if (b) b.uploaded++
-      }
-      for (const inv of monthlyReconciled) {
-        const key = `${inv.updatedAt.getUTCFullYear()}-${inv.updatedAt.getUTCMonth() + 1}`
-        const b = chartMap.get(key)
-        if (b) b.reconciled++
-      }
-      for (const inv of monthlyPaid) {
-        const key = `${inv.updatedAt.getUTCFullYear()}-${inv.updatedAt.getUTCMonth() + 1}`
-        const b = chartMap.get(key)
-        if (b) b.paid++
+      const pendingActions = {
+        reviewQueueCount,
+        reviewQueueOldestDaysAgo: reviewQueueOldest ? daysSince(reviewQueueOldest.createdAt) : 0,
+        sentBackCount,
+        sentBackOldestDaysAgo: sentBackOldest ? daysSince(sentBackOldest.createdAt) : 0,
+        unreconciledAmount: Number(unreconciledAgg._sum.invoiceAmount ?? 0),
+        unreconciledInvoiceCount,
+        excelOnlyPendingCount,
       }
 
-      type VendorRow = {
-        vendorId: string
-        vendorName: string
-        invoiced: number
-        reconciled: number
-        paid: number
-        pending: number
+      // ── vendorPaymentStatus ───────────────────────────────────────────────
+      type VendorPaymentRow = {
+        id: string; name: string
+        readyToPayAmount: number; needsReconAmount: number
+        underReviewAmount: number; totalOutstanding: number
       }
-      const vendorMap = new Map<string, VendorRow>()
-
-      for (const inv of vendorCurrentMonth) {
-        const vid = inv.vendor.id
-        if (!vendorMap.has(vid)) {
-          vendorMap.set(vid, {
-            vendorId: vid,
-            vendorName: inv.vendor.name,
-            invoiced: 0,
-            reconciled: 0,
-            paid: 0,
-            pending: 0,
+      const vendorMap = new Map<string, VendorPaymentRow>()
+      const ensure = (id: string, name: string) => {
+        if (!vendorMap.has(id)) {
+          vendorMap.set(id, {
+            id, name,
+            readyToPayAmount: 0, needsReconAmount: 0,
+            underReviewAmount: 0, totalOutstanding: 0,
           })
         }
-        const v = vendorMap.get(vid)!
-        v.invoiced += Number(inv.invoiceAmount)
+        return vendorMap.get(id)!
+      }
+      for (const g of reconciledGrnsRaw) {
+        ensure(g.invoice.vendor.id, g.invoice.vendor.name).readyToPayAmount += Number(g.grnAmount)
+      }
+      for (const inv of approvedInvoicesRaw) {
+        ensure(inv.vendor.id, inv.vendor.name).needsReconAmount += Number(inv.invoiceAmount)
+      }
+      for (const inv of underReviewInvoicesRaw) {
+        ensure(inv.vendor.id, inv.vendor.name).underReviewAmount += Number(inv.invoiceAmount)
+      }
+      for (const v of vendorMap.values()) {
+        v.totalOutstanding = v.readyToPayAmount + v.needsReconAmount + v.underReviewAmount
+      }
+      const vendorPaymentStatus = Array.from(vendorMap.values())
+        .filter((v) => v.totalOutstanding > 0)
+        .sort((a, b) => b.totalOutstanding - a.totalOutstanding)
+        .slice(0, 10)
 
-        for (const grn of inv.grnEntries) {
-          const amt = Number(grn.grnAmount)
-          if (grn.status === 'reconciled' || grn.status === 'paid') v.reconciled += amt
-          if (grn.status === 'paid') v.paid += amt
+      // ── reconciliationStatus ──────────────────────────────────────────────
+      const latestRunByMonth = new Map<string, string>()
+      for (const run of reconRuns) {
+        const key = `${run.periodYear}-${run.periodMonth}`
+        if (!latestRunByMonth.has(key)) latestRunByMonth.set(key, run.id)
+      }
+      const reconRunIds = Array.from(latestRunByMonth.values())
+
+      const [allReconResults, pendingPaymentGrns] = await Promise.all([
+        reconRunIds.length > 0
+          ? fastify.prisma.reconResult.findMany({
+              where: { reconRunId: { in: reconRunIds } },
+              select: { reconRunId: true, matchStatus: true, resolution: true },
+            })
+          : Promise.resolve([] as { reconRunId: string; matchStatus: string; resolution: string | null }[]),
+        reconRunIds.length > 0
+          ? fastify.prisma.grnEntry.findMany({
+              where: {
+                status: 'reconciled',
+                isDeleted: false,
+                reconResults: { some: { reconRunId: { in: reconRunIds } } },
+              },
+              select: {
+                grnAmount: true,
+                reconResults: {
+                  where: { reconRunId: { in: reconRunIds } },
+                  select: { reconRunId: true },
+                  take: 1,
+                },
+              },
+            })
+          : Promise.resolve([] as { grnAmount: { toString(): string }; reconResults: { reconRunId: string }[] }[]),
+      ])
+
+      const pendingPaymentByRun = new Map<string, number>()
+      for (const g of pendingPaymentGrns) {
+        const rid = g.reconResults[0]?.reconRunId
+        if (!rid) continue
+        pendingPaymentByRun.set(rid, (pendingPaymentByRun.get(rid) ?? 0) + Number(g.grnAmount))
+      }
+
+      const unresolvedByRun = new Map<string, number>()
+      for (const r of allReconResults) {
+        if (r.matchStatus !== 'matched' && (r.resolution === null || r.resolution === 'disputed')) {
+          unresolvedByRun.set(r.reconRunId, (unresolvedByRun.get(r.reconRunId) ?? 0) + 1)
         }
-        v.pending = v.invoiced - v.reconciled
       }
 
-      return {
-        totalInvoices,
-        pendingReview,
-        reconciledThisMonth,
-        paidThisMonthAmount: Number(paidThisMonthAgg._sum.totalAmount ?? 0),
-        monthlyChart: Array.from(chartMap.values()),
-        vendorSummaryCurrentMonth: Array.from(vendorMap.values()),
-        recentActivity: recentActivity.map(log => ({
-          action: log.action,
-          entityType: log.entityType,
-          userName: log.user?.name ?? null,
-          createdAt: log.createdAt,
-        })),
-      }
+      const reconciliationStatus = months.map(({ month, year, start, end, label }) => {
+        const grnUploaded = grnSyncRuns.some((r) => r.createdAt >= start && r.createdAt < end)
+        const reconRunId = latestRunByMonth.get(`${year}-${month}`)
+        const reconciliationDone = !!reconRunId
+        const unresolvedCount = reconRunId ? (unresolvedByRun.get(reconRunId) ?? 0) : 0
+        const pendingPaymentAmount = reconRunId ? (pendingPaymentByRun.get(reconRunId) ?? 0) : 0
+
+        let status: 'needs_grn' | 'needs_reconciliation' | 'has_disputes' | 'ready_to_pay' | 'complete'
+        if (!grnUploaded) status = 'needs_grn'
+        else if (!reconciliationDone) status = 'needs_reconciliation'
+        else if (unresolvedCount > 0) status = 'has_disputes'
+        else if (pendingPaymentAmount > 0) status = 'ready_to_pay'
+        else status = 'complete'
+
+        return { month, year, label, grnUploaded, reconciliationDone, unresolvedCount, pendingPaymentAmount, status }
+      })
+
+      const grnUploadPendingMonths = reconciliationStatus
+        .filter((m) => !m.grnUploaded)
+        .map((m) => m.label)
+
+      return { pendingActions, vendorPaymentStatus, reconciliationStatus, grnUploadPendingMonths }
     },
   )
 
   // GET /reports/reconciliation-summary
   fastify.get(
     '/reconciliation-summary',
-    { preHandler: [authenticate, requireRole('admin')] },
+    {
+      schema: { tags: ['Reports'], summary: 'Get reconciliation summary report' },
+      preHandler: [authenticate, requireRole('admin')],
+    },
     async (request: FastifyRequest, _reply: FastifyReply) => {
       const { month, year } = reconSummaryQuerySchema.parse(request.query)
 
@@ -314,7 +541,7 @@ export default async function reportsRoutes(fastify: FastifyInstance) {
 
       const matched = results.filter(r => r.matchStatus === 'matched').length
       const amountDiff = results.filter(r => r.matchStatus === 'amount_diff').length
-      const appOnly = results.filter(r => r.matchStatus === 'app_only').length
+      const appOnly = results.filter(r => r.matchStatus === 'grn_not_found' || r.matchStatus === 'invoice_only').length
       const excelOnly = results.filter(r => r.matchStatus === 'excel_only').length
       const disputed = results.filter(r => r.resolution === 'disputed').length
 
@@ -356,7 +583,7 @@ export default async function reportsRoutes(fastify: FastifyInstance) {
         const vb = vendorMap.get(v.id)!
         if (r.matchStatus === 'matched') vb.matched++
         else if (r.matchStatus === 'amount_diff') vb.amountDiff++
-        else if (r.matchStatus === 'app_only') vb.appOnly++
+        else if (r.matchStatus === 'grn_not_found' || r.matchStatus === 'invoice_only') vb.appOnly++
         else if (r.matchStatus === 'excel_only') vb.excelOnly++
 
         const dept = invoice.department
@@ -374,7 +601,7 @@ export default async function reportsRoutes(fastify: FastifyInstance) {
           const db = deptMap.get(dept.id)!
           if (r.matchStatus === 'matched') db.matched++
           else if (r.matchStatus === 'amount_diff') db.amountDiff++
-          else if (r.matchStatus === 'app_only') db.appOnly++
+          else if (r.matchStatus === 'grn_not_found' || r.matchStatus === 'invoice_only') db.appOnly++
           else if (r.matchStatus === 'excel_only') db.excelOnly++
         }
       }
@@ -394,7 +621,10 @@ export default async function reportsRoutes(fastify: FastifyInstance) {
   // GET /reports/pending-invoices
   fastify.get(
     '/pending-invoices',
-    { preHandler: [authenticate, requireRole('admin')] },
+    {
+      schema: { tags: ['Reports'], summary: 'List pending invoices report' },
+      preHandler: [authenticate, requireRole('admin')],
+    },
     async (request: FastifyRequest, _reply: FastifyReply) => {
       const { departmentId } = pendingInvoicesQuerySchema.parse(request.query)
       const now = new Date()
@@ -432,7 +662,10 @@ export default async function reportsRoutes(fastify: FastifyInstance) {
   // GET /reports/audit-log
   fastify.get(
     '/audit-log',
-    { preHandler: [authenticate, requireRole('admin')] },
+    {
+      schema: { tags: ['Reports'], summary: 'Query audit log entries' },
+      preHandler: [authenticate, requireRole('admin')],
+    },
     async (request: FastifyRequest, _reply: FastifyReply) => {
       const { userId, entityType, action, dateFrom, dateTo, page, limit } =
         auditLogQuerySchema.parse(request.query)
