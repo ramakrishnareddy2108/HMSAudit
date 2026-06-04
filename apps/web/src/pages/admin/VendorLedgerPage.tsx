@@ -36,6 +36,7 @@ interface VendorOption {
   name: string
   isActive: boolean
   outstandingAmount: number
+  isCleared: boolean
 }
 
 interface GrnItem {
@@ -109,6 +110,7 @@ interface LedgerResponse {
 
 type Preset = 'last3' | 'last6' | 'thisYear' | 'custom'
 type TxFilter = 'all' | 'invoices' | 'payments' | 'unpaid'
+type VendorStatusFilter = 'all' | 'pending' | 'cleared'
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -227,12 +229,14 @@ function VendorCombobox({
                 )}
               >
                 <span>{v.name}</span>
-                {v.outstandingAmount > 0 ? (
+                {v.isCleared ? (
+                  <span className="ml-2 text-xs text-green-600">— Cleared ✓</span>
+                ) : v.outstandingAmount > 0 ? (
                   <span className="ml-2 text-xs text-muted-foreground">
                     — {inr(v.outstandingAmount)} outstanding
                   </span>
                 ) : (
-                  <span className="ml-2 text-xs text-green-600">— Cleared ✓</span>
+                  <span className="ml-2 text-xs text-amber-600">— Pending</span>
                 )}
               </button>
             ))
@@ -371,6 +375,7 @@ export default function VendorLedgerPage() {
 
   // UI state
   const [txFilter, setTxFilter] = useState<TxFilter>('all')
+  const [vendorStatusFilter, setVendorStatusFilter] = useState<VendorStatusFilter>('all')
   const [expandedMonths, setExpandedMonths] = useState<Set<string>>(new Set())
   const [expandedInvoices, setExpandedInvoices] = useState<Set<string>>(new Set())
 
@@ -613,6 +618,12 @@ export default function VendorLedgerPage() {
 
   // ── Derived state ──
 
+  const filteredVendors = useMemo(() => {
+    if (vendorStatusFilter === 'all') return vendors
+    if (vendorStatusFilter === 'cleared') return vendors.filter((v) => v.isCleared)
+    return vendors.filter((v) => !v.isCleared)
+  }, [vendors, vendorStatusFilter])
+
   const filteredMonths = useMemo(() => {
     if (!ledgerQuery.data) return []
     return ledgerQuery.data.transactionsByMonth
@@ -680,12 +691,37 @@ export default function VendorLedgerPage() {
       {/* ── Vendor selection + date range bar ── */}
       <div className="flex flex-wrap items-end gap-3 vlp-no-print">
         <div className="space-y-1.5">
-          <Label>Vendor</Label>
+          <div className="flex items-center justify-between gap-3">
+            <Label>Vendor</Label>
+            <div className="flex gap-1">
+              {(
+                [
+                  ['all', 'All'],
+                  ['pending', 'Payment Pending'],
+                  ['cleared', 'Cleared'],
+                ] as [VendorStatusFilter, string][]
+              ).map(([f, label]) => (
+                <button
+                  key={f}
+                  type="button"
+                  onClick={() => setVendorStatusFilter(f)}
+                  className={cn(
+                    'rounded px-2 py-0.5 text-xs transition-colors',
+                    vendorStatusFilter === f
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-muted text-muted-foreground hover:bg-muted/80',
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
           {vendorsLoading ? (
             <div className="h-10 w-80 animate-pulse rounded-md bg-muted" />
           ) : (
             <VendorCombobox
-              vendors={vendors}
+              vendors={filteredVendors}
               value={selectedVendorId}
               onChange={(id, name) => {
                 setSelectedVendorId(id)

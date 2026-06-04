@@ -18,7 +18,9 @@ interface WorkStatus {
   grnUploadedDate: string | null
   reconciliationDone: boolean
   unresolvedConflicts: number
-  pendingPaymentAmount: number
+  readyToPayAmount: number
+  readyToPayGrnCount: number
+  readyToPayVendorCount: number
   pendingReviewCount: number
   sentBackCount: number
   status: 'needs_grn' | 'needs_resolution' | 'needs_reconciliation' | 'has_pending_review' | 'ready_to_pay' | 'complete'
@@ -30,6 +32,7 @@ interface HospitalRow {
   workStatus: WorkStatus
   overall: {
     totalOutstanding: number
+    needsReconAmount: number
     totalVendors: number
     totalUsers: number
   }
@@ -40,6 +43,9 @@ interface MonthlyStatusResponse {
   crossHospitalTotals: {
     totalPendingReview: number
     totalReadyToPay: number
+    totalReadyToPayGrnCount: number
+    totalReadyToPayVendorCount: number
+    totalNeedsRecon: number
     totalOutstanding: number
     hospitalsNeedingAction: number
   }
@@ -152,7 +158,7 @@ function buildColumns(
       id: 'pay',
       header: 'Ready to Pay',
       cell: ({ row }) => {
-        const a = row.original.workStatus.pendingPaymentAmount
+        const a = row.original.workStatus.readyToPayAmount
         return a > 0 ? (
           <span className="text-green-700 font-semibold text-sm tabular-nums">{INR(a)}</span>
         ) : (
@@ -206,7 +212,7 @@ function buildColumns(
         if (ws.status === 'ready_to_pay') {
           return (
             <Button size="sm" variant="outline" className="h-7 text-xs" onClick={() => go('/admin/payments')}>
-              Pay {INR(ws.pendingPaymentAmount)}
+              Pay {INR(ws.readyToPayAmount)}
             </Button>
           )
         }
@@ -358,23 +364,34 @@ export default function MyDashboardPage() {
             {isLoading ? '—' : (totals?.hospitalsNeedingAction ?? 0)}
           </p>
         </div>
-        <div className={cn('rounded-lg border bg-card p-4 space-y-1', totals && totals.totalPendingReview > 0 && 'border-amber-300 bg-amber-50/60')}>
-          <p className="text-xs text-muted-foreground uppercase tracking-wide">Total Pending Review</p>
+        <div className={cn('rounded-lg border bg-card p-4 space-y-1.5', totals && totals.totalPendingReview > 0 ? 'border-amber-300 bg-amber-50/60' : '')}>
+          <p className="text-xs text-muted-foreground uppercase tracking-wide">Pending Review</p>
           <p className={cn('text-2xl font-bold tabular-nums', totals && totals.totalPendingReview > 0 ? 'text-amber-700' : 'text-foreground')}>
             {isLoading ? '—' : (totals?.totalPendingReview ?? 0)}
           </p>
+          <p className="text-xs text-muted-foreground">Awaiting reviewer approval</p>
         </div>
-        <div className="rounded-lg border bg-card p-4 space-y-1">
-          <p className="text-xs text-muted-foreground uppercase tracking-wide">Total Ready to Pay</p>
+        <div className="rounded-lg border border-green-200 bg-green-50/40 p-4 space-y-1.5">
+          <p className="text-xs text-muted-foreground uppercase tracking-wide">Ready to Pay</p>
           <p className="text-2xl font-bold tabular-nums text-green-700">
             {isLoading ? '—' : INR(totals?.totalReadyToPay ?? 0)}
           </p>
+          {!isLoading && totals && (
+            <p className="text-xs text-muted-foreground">
+              {totals.totalReadyToPayGrnCount} GRN{totals.totalReadyToPayGrnCount !== 1 ? 's' : ''} across {totals.totalReadyToPayVendorCount} vendor{totals.totalReadyToPayVendorCount !== 1 ? 's' : ''}
+            </p>
+          )}
         </div>
-        <div className="rounded-lg border bg-card p-4 space-y-1">
+        <div className="rounded-lg border bg-card p-4 space-y-1.5">
           <p className="text-xs text-muted-foreground uppercase tracking-wide">Total Outstanding</p>
           <p className="text-2xl font-bold tabular-nums">
             {isLoading ? '—' : INR(totals?.totalOutstanding ?? 0)}
           </p>
+          {!isLoading && totals && totals.totalNeedsRecon > 0 && (
+            <p className="text-xs text-muted-foreground">
+              Includes {INR(totals.totalNeedsRecon)} needs reconciliation
+            </p>
+          )}
         </div>
       </div>
 

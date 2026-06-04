@@ -141,16 +141,20 @@ export default async function vendorsRoutes(fastify: FastifyInstance) {
 
       if (vendorIds.length === 0) return { data: [], pagination }
 
-      const [invoiceGrns, allPayments, allInvoiceDates] = await Promise.all([
-        request.server.prisma.invoice.findMany({
-          where: { vendorId: { in: vendorIds } },
-          select: {
-            vendorId: true,
-            grnEntries: {
-              where: { status: 'reconciled', isDeleted: false },
-              select: { grnAmount: true },
-            },
+      const [billedAgg, paidAgg, allPayments, allInvoiceDates, reconciledUnpaidGrns, pendingGrnsOnApproved] = await Promise.all([
+        request.server.prisma.invoice.groupBy({
+          by: ['vendorId'],
+          where: {
+            vendorId: { in: vendorIds },
+            status: { in: ['approved', 'reconciled', 'paid'] },
+            isDeleted: false,
           },
+          _sum: { invoiceAmount: true },
+        }),
+        request.server.prisma.payment.groupBy({
+          by: ['vendorId'],
+          where: { vendorId: { in: vendorIds } },
+          _sum: { totalAmount: true },
         }),
         request.server.prisma.payment.findMany({
           where: { vendorId: { in: vendorIds } },
@@ -162,13 +166,46 @@ export default async function vendorsRoutes(fastify: FastifyInstance) {
           orderBy: { invoiceDate: 'desc' },
           select: { vendorId: true, invoiceDate: true },
         }),
+        // Vendors with reconciled/partial_paid GRNs that still have remaining balance — not cleared
+        // Mirrors vendor ledger: status reconciled+partial_paid, sum(grnAmount - paidAmount) > 0
+        request.server.prisma.grnEntry.findMany({
+          where: {
+            invoice: { vendorId: { in: vendorIds }, isDeleted: false },
+            status: { in: ['reconciled', 'partial_paid'] },
+          },
+          select: {
+            grnAmount: true,
+            paidAmount: true,
+            invoice: { select: { vendorId: true } },
+          },
+        }),
+        // Vendors that have pending GRNs on approved invoices — not cleared
+        request.server.prisma.grnEntry.findMany({
+          where: {
+            invoice: { vendorId: { in: vendorIds }, status: 'approved', isDeleted: false },
+            status: 'pending',
+            isDeleted: false,
+          },
+          select: { invoice: { select: { vendorId: true } } },
+        }),
       ])
 
-      const outstandingMap = new Map<string, number>()
-      for (const inv of invoiceGrns) {
-        const current = outstandingMap.get(inv.vendorId) ?? 0
-        outstandingMap.set(inv.vendorId, current + inv.grnEntries.reduce((s, g) => s + Number(g.grnAmount), 0))
+      const billedMap = new Map<string, number>()
+      for (const b of billedAgg) {
+        billedMap.set(b.vendorId, Number(b._sum.invoiceAmount ?? 0))
       }
+
+      const paidMap = new Map<string, number>()
+      for (const p of paidAgg) {
+        paidMap.set(p.vendorId, Number(p._sum.totalAmount ?? 0))
+      }
+
+      const vendorsWithUnpaidRecon = new Set(
+        reconciledUnpaidGrns
+          .filter((g) => Number(g.grnAmount) > Number(g.paidAmount))
+          .map((g) => g.invoice.vendorId),
+      )
+      const vendorsWithPendingGrns = new Set(pendingGrnsOnApproved.map((g) => g.invoice.vendorId))
 
       const lastPaymentMap = new Map<string, Date>()
       for (const p of allPayments) {
@@ -183,12 +220,18 @@ export default async function vendorsRoutes(fastify: FastifyInstance) {
       }
 
       const augmented = vendors
-        .map((v) => ({
-          ...v,
-          outstandingAmount: outstandingMap.get(v.id) ?? 0,
-          lastPaymentDate: lastPaymentMap.get(v.id) ?? null,
-          lastInvoiceDate: lastInvoiceDateMap.get(v.id) ?? null,
-        }))
+        .map((v) => {
+          const billed = billedMap.get(v.id) ?? 0
+          const paid = paidMap.get(v.id) ?? 0
+          const outstanding = Math.max(0, billed - paid)
+          return {
+            ...v,
+            outstandingAmount: outstanding,
+            isCleared: !vendorsWithUnpaidRecon.has(v.id) && !vendorsWithPendingGrns.has(v.id),
+            lastPaymentDate: lastPaymentMap.get(v.id) ?? null,
+            lastInvoiceDate: lastInvoiceDateMap.get(v.id) ?? null,
+          }
+        })
         .sort((a, b) => b.outstandingAmount - a.outstandingAmount)
 
       return { data: augmented, pagination }

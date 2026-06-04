@@ -2,6 +2,7 @@ import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { InvoiceStatus, BillType, GrnEntryStatus, PaymentMode } from '@prisma/client'
 import { z } from 'zod'
 import { authenticate, requireRole } from '../middleware/auth'
+import { getVendorFinancialSummary } from '../services/dashboardStatsService'
 
 const vendorLedgerQuerySchema = z.object({
   vendorId: z.string().uuid(),
@@ -117,9 +118,18 @@ export default async function reportsRoutes(fastify: FastifyInstance) {
           },
           select: { grnAmount: true, paidAmount: true },
         }),
-        fastify.prisma.invoice.aggregate({
-          where: { vendorId, status: 'approved' },
-          _sum: { invoiceAmount: true },
+        fastify.prisma.invoice.findMany({
+          where: {
+            vendorId,
+            status: 'approved',
+            grnEntries: {
+              none: {
+                status: { in: ['reconciled', 'partial_paid', 'paid'] },
+                isDeleted: false,
+              },
+            },
+          },
+          select: { invoiceAmount: true },
         }),
         fastify.prisma.grnMaster.aggregate({
           where: { vendorId, pendingUpload: true },
@@ -146,7 +156,7 @@ export default async function reportsRoutes(fastify: FastifyInstance) {
         totalReconciled,
         totalOutstanding: totalBilled - totalPaid + openingBalanceAmount,
         readyToPay,
-        needsReconciliation: Number(needsReconAgg._sum.invoiceAmount ?? 0),
+        needsReconciliation: needsReconAgg.reduce((s, inv) => s + Number(inv.invoiceAmount), 0),
         underReview: {
           count: underReviewAgg._count._all,
           amount: Number(underReviewAgg._sum.invoiceAmount ?? 0),
@@ -303,14 +313,11 @@ export default async function reportsRoutes(fastify: FastifyInstance) {
         reviewQueueOldest,
         sentBackCount,
         sentBackOldest,
-        unreconciledAgg,
-        unreconciledInvoiceCount,
         excelOnlyPendingCount,
-        reconciledGrnsRaw,
-        approvedInvoicesRaw,
-        underReviewInvoicesRaw,
-        grnSyncRuns,
+        grnEntriesForRange,
         reconRuns,
+        reviewedInvoicesForRange,
+        vendorSummary,
       ] = await Promise.all([
         fastify.prisma.invoice.count({
           where: { status: { in: ['pending_review', 're_submitted'] }, isDeleted: false },
@@ -328,40 +335,15 @@ export default async function reportsRoutes(fastify: FastifyInstance) {
           orderBy: { createdAt: 'asc' },
           select: { createdAt: true },
         }),
-        fastify.prisma.invoice.aggregate({
-          where: { status: 'approved', isDeleted: false },
-          _sum: { invoiceAmount: true },
-        }),
-        fastify.prisma.invoice.count({
-          where: { status: 'approved', isDeleted: false },
-        }),
         fastify.prisma.grnMaster.count({
           where: { pendingUpload: true },
         }),
         fastify.prisma.grnEntry.findMany({
-          where: { status: 'reconciled', isDeleted: false },
-          select: {
-            grnAmount: true,
-            invoice: { select: { vendor: { select: { id: true, name: true } } } },
-          },
-        }),
-        fastify.prisma.invoice.findMany({
-          where: { status: 'approved', isDeleted: false },
-          select: { invoiceAmount: true, vendor: { select: { id: true, name: true } } },
-        }),
-        fastify.prisma.invoice.findMany({
           where: {
-            status: { in: ['draft', 'pending_review', 'sent_back', 're_submitted'] },
+            grnDate: { gte: months[0].start },
             isDeleted: false,
           },
-          select: { invoiceAmount: true, vendor: { select: { id: true, name: true } } },
-        }),
-        fastify.prisma.grnSyncRun.findMany({
-          where: {
-            createdAt: { gte: months[0].start },
-            status: { in: ['completed', 'has_conflicts'] },
-          },
-          select: { createdAt: true },
+          select: { grnDate: true },
         }),
         fastify.prisma.reconciliationRun.findMany({
           where: {
@@ -371,6 +353,20 @@ export default async function reportsRoutes(fastify: FastifyInstance) {
           select: { id: true, periodMonth: true, periodYear: true },
           orderBy: { createdAt: 'desc' },
         }),
+        fastify.prisma.invoice.findMany({
+          where: {
+            status: { in: ['approved', 'reconciled', 'paid'] },
+            billType: { not: 'miscellaneous' },
+            invoiceDate: { gte: months[0].start },
+            isDeleted: false,
+          },
+          select: {
+            invoiceDate: true,
+            _count: { select: { grnEntries: { where: { isDeleted: false } } } },
+          },
+        }),
+        // Uses same logic as vendor ledger: reconciled + partial_paid GRNs, grnAmount - paidAmount
+        getVendorFinancialSummary(fastify.prisma, {}),
       ])
 
       // ── pendingActions ────────────────────────────────────────────────────
@@ -382,8 +378,8 @@ export default async function reportsRoutes(fastify: FastifyInstance) {
         reviewQueueOldestDaysAgo: reviewQueueOldest ? daysSince(reviewQueueOldest.createdAt) : 0,
         sentBackCount,
         sentBackOldestDaysAgo: sentBackOldest ? daysSince(sentBackOldest.createdAt) : 0,
-        unreconciledAmount: Number(unreconciledAgg._sum.invoiceAmount ?? 0),
-        unreconciledInvoiceCount,
+        unreconciledAmount: vendorSummary.needsReconciliation,
+        unreconciledInvoiceCount: vendorSummary.needsReconciliationInvoiceCount,
         excelOnlyPendingCount,
       }
 
@@ -393,31 +389,16 @@ export default async function reportsRoutes(fastify: FastifyInstance) {
         readyToPayAmount: number; needsReconAmount: number
         underReviewAmount: number; totalOutstanding: number
       }
-      const vendorMap = new Map<string, VendorPaymentRow>()
-      const ensure = (id: string, name: string) => {
-        if (!vendorMap.has(id)) {
-          vendorMap.set(id, {
-            id, name,
-            readyToPayAmount: 0, needsReconAmount: 0,
-            underReviewAmount: 0, totalOutstanding: 0,
-          })
-        }
-        return vendorMap.get(id)!
-      }
-      for (const g of reconciledGrnsRaw) {
-        ensure(g.invoice.vendor.id, g.invoice.vendor.name).readyToPayAmount += Number(g.grnAmount)
-      }
-      for (const inv of approvedInvoicesRaw) {
-        ensure(inv.vendor.id, inv.vendor.name).needsReconAmount += Number(inv.invoiceAmount)
-      }
-      for (const inv of underReviewInvoicesRaw) {
-        ensure(inv.vendor.id, inv.vendor.name).underReviewAmount += Number(inv.invoiceAmount)
-      }
-      for (const v of vendorMap.values()) {
-        v.totalOutstanding = v.readyToPayAmount + v.needsReconAmount + v.underReviewAmount
-      }
-      const vendorPaymentStatus = Array.from(vendorMap.values())
-        .filter((v) => v.totalOutstanding > 0)
+      const vendorPaymentStatus: VendorPaymentRow[] = vendorSummary.vendors
+        .filter((v) => v.readyToPay > 0 || v.needsRecon > 0 || v.underReview > 0)
+        .map((v) => ({
+          id: v.vendorId,
+          name: v.vendorName,
+          readyToPayAmount: v.readyToPay,
+          needsReconAmount: v.needsRecon,
+          underReviewAmount: v.underReview,
+          totalOutstanding: v.total,
+        }))
         .sort((a, b) => b.totalOutstanding - a.totalOutstanding)
         .slice(0, 10)
 
@@ -429,31 +410,24 @@ export default async function reportsRoutes(fastify: FastifyInstance) {
       }
       const reconRunIds = Array.from(latestRunByMonth.values())
 
-      const [allReconResults, pendingPaymentGrns] = await Promise.all([
-        reconRunIds.length > 0
-          ? fastify.prisma.reconResult.findMany({
-              where: { reconRunId: { in: reconRunIds } },
-              select: { reconRunId: true, matchStatus: true, resolution: true },
-            })
-          : Promise.resolve([] as { reconRunId: string; matchStatus: string; resolution: string | null }[]),
-        reconRunIds.length > 0
-          ? fastify.prisma.grnEntry.findMany({
-              where: {
-                status: 'reconciled',
-                isDeleted: false,
-                reconResults: { some: { reconRunId: { in: reconRunIds } } },
+      const pendingPaymentGrns = reconRunIds.length > 0
+        ? await fastify.prisma.grnEntry.findMany({
+            where: {
+              status: 'reconciled',
+              isDeleted: false,
+              invoice: { status: { in: ['approved', 'reconciled'] }, isDeleted: false },
+              reconResults: { some: { reconRunId: { in: reconRunIds } } },
+            },
+            select: {
+              grnAmount: true,
+              reconResults: {
+                where: { reconRunId: { in: reconRunIds } },
+                select: { reconRunId: true },
+                take: 1,
               },
-              select: {
-                grnAmount: true,
-                reconResults: {
-                  where: { reconRunId: { in: reconRunIds } },
-                  select: { reconRunId: true },
-                  take: 1,
-                },
-              },
-            })
-          : Promise.resolve([] as { grnAmount: { toString(): string }; reconResults: { reconRunId: string }[] }[]),
-      ])
+            },
+          })
+        : []
 
       const pendingPaymentByRun = new Map<string, number>()
       for (const g of pendingPaymentGrns) {
@@ -462,18 +436,16 @@ export default async function reportsRoutes(fastify: FastifyInstance) {
         pendingPaymentByRun.set(rid, (pendingPaymentByRun.get(rid) ?? 0) + Number(g.grnAmount))
       }
 
-      const unresolvedByRun = new Map<string, number>()
-      for (const r of allReconResults) {
-        if (r.matchStatus !== 'matched' && (r.resolution === null || r.resolution === 'disputed')) {
-          unresolvedByRun.set(r.reconRunId, (unresolvedByRun.get(r.reconRunId) ?? 0) + 1)
-        }
-      }
-
       const reconciliationStatus = months.map(({ month, year, start, end, label }) => {
-        const grnUploaded = grnSyncRuns.some((r) => r.createdAt >= start && r.createdAt < end)
+        const grnUploaded = grnEntriesForRange.some(
+          (g) => g.grnDate !== null && g.grnDate >= start && g.grnDate < end,
+        )
         const reconRunId = latestRunByMonth.get(`${year}-${month}`)
-        const reconciliationDone = !!reconRunId
-        const unresolvedCount = reconRunId ? (unresolvedByRun.get(reconRunId) ?? 0) : 0
+        const reconciliationDone = grnUploaded && !!reconRunId
+        const monthReviewedInvoices = reviewedInvoicesForRange.filter(
+          (inv) => inv.invoiceDate !== null && inv.invoiceDate >= start && inv.invoiceDate < end,
+        )
+        const unresolvedCount = monthReviewedInvoices.filter((inv) => inv._count.grnEntries === 0).length
         const pendingPaymentAmount = reconRunId ? (pendingPaymentByRun.get(reconRunId) ?? 0) : 0
 
         let status: 'needs_grn' | 'needs_reconciliation' | 'has_disputes' | 'ready_to_pay' | 'complete'

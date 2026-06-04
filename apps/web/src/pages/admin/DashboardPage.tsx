@@ -493,7 +493,9 @@ export default function DashboardPage() {
 
                       {/* Reconciled */}
                       <td className="px-4 py-3 whitespace-nowrap">
-                        {row.reconciliationDone ? (
+                        {!row.grnUploaded ? (
+                          <span className="text-muted-foreground">—</span>
+                        ) : row.reconciliationDone ? (
                           row.unresolvedCount > 0 ? (
                             <span className="inline-flex items-center gap-1 text-amber-700">
                               <AlertTriangle size={14} /> {row.unresolvedCount} unresolved
@@ -504,9 +506,7 @@ export default function DashboardPage() {
                             </span>
                           )
                         ) : (
-                          <span className="inline-flex items-center gap-1 text-muted-foreground">
-                            <XCircle size={14} /> Not run
-                          </span>
+                          <span className="text-muted-foreground text-xs">Pending</span>
                         )}
                       </td>
 

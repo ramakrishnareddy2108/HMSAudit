@@ -2,6 +2,7 @@ import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import { z } from 'zod'
 import { authenticate, requireSuperAdmin } from '../middleware/auth'
 import { storageService } from '../services/storageService'
+import { getVendorFinancialSummary } from '../services/dashboardStatsService'
 
 interface DbTableStat {
   tablename: string
@@ -227,23 +228,23 @@ export default async function superAdminRoutes(fastify: FastifyInstance) {
       const hospitalResults = await Promise.all(
         hospitals.map(async (h) => {
           const [
-            latestGrnSync,
+            latestGrnEntry,
             unresolvedConflicts,
             reconRun,
             pendingReviewCount,
             sentBackCount,
-            totalOutstandingResult,
+            vendorSummary,
             totalVendors,
             totalUsers,
           ] = await Promise.all([
-            request.server.prisma.grnSyncRun.findFirst({
+            request.server.prisma.grnEntry.findFirst({
               where: {
                 hospitalId: h.id,
-                createdAt: { gte: startOfMonth, lt: endOfMonth },
-                status: { in: ['completed', 'has_conflicts'] },
+                grnDate: { gte: startOfMonth, lt: endOfMonth },
+                isDeleted: false,
               },
-              orderBy: { createdAt: 'asc' },
-              select: { createdAt: true },
+              orderBy: { grnDate: 'asc' },
+              select: { grnDate: true },
             }),
             request.server.prisma.grnConflict.count({
               where: { hospitalId: h.id, resolution: null },
@@ -268,10 +269,8 @@ export default async function superAdminRoutes(fastify: FastifyInstance) {
             request.server.prisma.invoice.count({
               where: { hospitalId: h.id, status: 'sent_back', isDeleted: false },
             }),
-            request.server.prisma.grnEntry.aggregate({
-              where: { hospitalId: h.id, status: 'reconciled', isDeleted: false },
-              _sum: { grnAmount: true },
-            }),
+            // Uses same logic as vendor ledger: reconciled + partial_paid, grnAmount - paidAmount
+            getVendorFinancialSummary(request.server.prisma, { hospitalId: h.id }),
             request.server.prisma.vendor.count({
               where: { hospitalId: h.id, isDeleted: false, isActive: true },
             }),
@@ -280,24 +279,15 @@ export default async function superAdminRoutes(fastify: FastifyInstance) {
             }),
           ])
 
-          const grnUploaded = latestGrnSync !== null
-          const grnUploadedDate = latestGrnSync?.createdAt ?? null
+          const grnUploaded = latestGrnEntry !== null
+          const grnUploadedDate = latestGrnEntry?.grnDate ?? null
           const reconciliationDone = reconRun !== null
-          const totalOutstanding = Number(totalOutstandingResult._sum.grnAmount ?? 0)
 
-          let pendingPaymentAmount = 0
-          if (reconRun) {
-            const payResult = await request.server.prisma.grnEntry.aggregate({
-              where: {
-                hospitalId: h.id,
-                status: 'reconciled',
-                isDeleted: false,
-                reconResults: { some: { reconRunId: reconRun.id } },
-              },
-              _sum: { grnAmount: true },
-            })
-            pendingPaymentAmount = Number(payResult._sum.grnAmount ?? 0)
-          }
+          const readyToPayAmount = vendorSummary.readyToPay
+          const readyToPayGrnCount = vendorSummary.readyToPayGrnCount
+          const readyToPayVendorCount = vendorSummary.vendors.filter((v) => v.readyToPay > 0).length
+          const needsReconAmount = vendorSummary.needsReconciliation
+          const totalOutstanding = readyToPayAmount + needsReconAmount
 
           let status: 'needs_grn' | 'needs_resolution' | 'needs_reconciliation' | 'has_pending_review' | 'ready_to_pay' | 'complete'
           if (!grnUploaded) {
@@ -308,7 +298,7 @@ export default async function superAdminRoutes(fastify: FastifyInstance) {
             status = 'needs_reconciliation'
           } else if (pendingReviewCount > 0) {
             status = 'has_pending_review'
-          } else if (pendingPaymentAmount > 0) {
+          } else if (readyToPayAmount > 0) {
             status = 'ready_to_pay'
           } else {
             status = 'complete'
@@ -322,13 +312,16 @@ export default async function superAdminRoutes(fastify: FastifyInstance) {
               grnUploadedDate,
               reconciliationDone,
               unresolvedConflicts,
-              pendingPaymentAmount,
+              readyToPayAmount,
+              readyToPayGrnCount,
+              readyToPayVendorCount,
               pendingReviewCount,
               sentBackCount,
               status,
             },
             overall: {
               totalOutstanding,
+              needsReconAmount,
               totalVendors,
               totalUsers,
             },
@@ -338,7 +331,10 @@ export default async function superAdminRoutes(fastify: FastifyInstance) {
 
       const crossHospitalTotals = {
         totalPendingReview: hospitalResults.reduce((s, h) => s + h.workStatus.pendingReviewCount, 0),
-        totalReadyToPay: hospitalResults.reduce((s, h) => s + h.workStatus.pendingPaymentAmount, 0),
+        totalReadyToPay: hospitalResults.reduce((s, h) => s + h.workStatus.readyToPayAmount, 0),
+        totalReadyToPayGrnCount: hospitalResults.reduce((s, h) => s + h.workStatus.readyToPayGrnCount, 0),
+        totalReadyToPayVendorCount: hospitalResults.reduce((s, h) => s + h.workStatus.readyToPayVendorCount, 0),
+        totalNeedsRecon: hospitalResults.reduce((s, h) => s + h.overall.needsReconAmount, 0),
         totalOutstanding: hospitalResults.reduce((s, h) => s + h.overall.totalOutstanding, 0),
         hospitalsNeedingAction: hospitalResults.filter((h) => h.workStatus.status !== 'complete').length,
       }
